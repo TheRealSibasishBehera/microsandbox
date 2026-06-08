@@ -398,6 +398,7 @@ async fn handle_socks4(
         .send(Bytes::from_static(&[0x00, 0x5a, 0, 0, 0, 0, 0, 0]))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "to_smoltcp closed"))?;
+    shared.proxy_wake.wake();
 
     let (from_smoltcp, leftover) = reader.into_parts();
 
@@ -447,6 +448,7 @@ async fn handle_socks5(
         .send(Bytes::from_static(&[0x05, 0x00]))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "to_smoltcp closed"))?;
+    shared.proxy_wake.wake();
 
     // --- CONNECT request ---
     // VER(1)=5  CMD(1)  RSV(1)=0  ATYP(1)  DST.ADDR(var)  DST.PORT(2)
@@ -516,6 +518,7 @@ async fn handle_socks5(
         ]))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "to_smoltcp closed"))?;
+    shared.proxy_wake.wake();
 
     let (from_smoltcp, leftover) = reader.into_parts();
 
