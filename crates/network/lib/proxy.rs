@@ -591,8 +591,19 @@ async fn dispatch_socks_tunnel(
 
         // guest_dst for the TLS proxy is the SOCKS target as seen by the guest
         // (so policy rules match the right name/IP). connect_dst is the resolved
-        // host-side address.
-        let socks_guest_dst = SocketAddr::new(connect_dst.ip(), target_port);
+        // host-side address. For the host alias, restore the gateway IP so that
+        // SecretsHandler::host_alias_matches can verify the connection identity —
+        // it compares guest_ip against gateway_ipv4/ipv6, not against loopback.
+        let socks_guest_ip = if target_host.eq_ignore_ascii_case(HOST_ALIAS) {
+            gateway
+                .ipv4
+                .map(IpAddr::V4)
+                .or_else(|| gateway.ipv6.map(IpAddr::V6))
+                .unwrap_or(connect_dst.ip())
+        } else {
+            connect_dst.ip()
+        };
+        let socks_guest_dst = SocketAddr::new(socks_guest_ip, target_port);
         let handle = tls_proxy::spawn_tls_proxy(
             &tokio::runtime::Handle::current(),
             socks_guest_dst,
