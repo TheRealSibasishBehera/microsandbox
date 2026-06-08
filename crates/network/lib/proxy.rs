@@ -147,6 +147,7 @@ pub fn spawn_tcp_proxy(
     gateway: GatewayIps,
     upstream_connected: Arc<AtomicBool>,
 ) {
+    eprintln!("[tcp_proxy] spawn guest={guest_dst} connect={connect_dst}");
     handle.spawn(async move {
         if let Err(e) = tcp_proxy_task(
             guest_dst,

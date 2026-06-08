@@ -441,6 +441,7 @@ pub fn smoltcp_poll_loop(
         // Detect newly-established connections and spawn proxy tasks.
         let new_conns = conn_tracker.take_new_connections(&mut sockets);
         for conn in new_conns {
+            eprintln!("[stack] new_conn dst={}", conn.dst);
             if let Some(ref tls_state) = tls_state
                 && tls_state
                     .config
