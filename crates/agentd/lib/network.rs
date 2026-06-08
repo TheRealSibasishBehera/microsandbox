@@ -82,13 +82,13 @@ pub(crate) fn apply_network_config(cfg: NetConfig<'_>) -> AgentdResult<()> {
 ///   gateway IP is set for the matching family, emits `<gw>\t<alias>` lines.
 /// * `gateway_ipv4` - IPv4 the alias resolves to. The IPv4 alias line is
 ///   skipped when `None` (or when `host_alias` is `None`).
-/// * `gateway_ipv6` - IPv6 the alias resolves to. The IPv6 alias line is
-///   skipped when `None` (or when `host_alias` is `None`).
+/// * `gateway_ipv6` - Unused. The virtio-net backend does not deliver IPv6
+///   frames from the guest, so the IPv6 alias line is always omitted.
 fn hosts_file_contents(
     hostname: Option<&str>,
     host_alias: Option<&str>,
     gateway_ipv4: Option<Ipv4Addr>,
-    gateway_ipv6: Option<Ipv6Addr>,
+    _gateway_ipv6: Option<Ipv6Addr>,
 ) -> String {
     let mut s = String::new();
 
@@ -103,14 +103,13 @@ fn hosts_file_contents(
         s.push_str("::1\tlocalhost ip6-localhost ip6-loopback\n");
     }
 
-    // `<host_alias>` → gateway IP mapping. Emits both address families
-    // so v4-only and v6-only resolvers find the alias.
+    // `<host_alias>` → gateway IPv4 only. The virtio-net backend does not
+    // deliver IPv6 frames from the guest, so an IPv6 entry would cause
+    // Happy Eyeballs to prefer the unreachable gateway IPv6 address and
+    // time out (~75 s) before falling back to IPv4.
     if let Some(alias) = host_alias {
         if let Some(gw_v4) = gateway_ipv4 {
             s.push_str(&format!("{gw_v4}\t{alias}\n"));
-        }
-        if let Some(gw_v6) = gateway_ipv6 {
-            s.push_str(&format!("{gw_v6}\t{alias}\n"));
         }
     }
 
@@ -673,7 +672,10 @@ mod tests {
     }
 
     #[test]
-    fn test_hosts_file_with_host_alias_both_families() {
+    fn test_hosts_file_with_host_alias_ipv4_only_even_when_ipv6_present() {
+        // The virtio-net backend does not deliver IPv6 frames from the guest,
+        // so the IPv6 alias entry is omitted to prevent Happy Eyeballs from
+        // preferring the unreachable gateway IPv6 address.
         assert_eq!(
             hosts_file_contents(
                 Some("worker-01"),
@@ -685,7 +687,6 @@ mod tests {
                 "127.0.0.1\tlocalhost worker-01\n",
                 "::1\tlocalhost ip6-localhost ip6-loopback worker-01\n",
                 "100.96.0.1\thost.microsandbox.internal\n",
-                "fd42:6d73:62::1\thost.microsandbox.internal\n",
                 "fe00::\tip6-localnet\n",
                 "ff00::\tip6-mcastprefix\n",
                 "ff02::1\tip6-allnodes\n",
