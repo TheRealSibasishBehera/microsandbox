@@ -294,6 +294,7 @@ pub fn smoltcp_poll_loop(
 
             match classify_frame(frame) {
                 FrameAction::TcpSyn { src, dst } => {
+                    eprintln!("[stack] TcpSyn src={src} dst={dst}");
                     let allow = match DnsPortType::from_tcp(dst.port()) {
                         // Plain DNS: the interceptor enforces policy at
                         // the application layer (block list + rebind
@@ -336,8 +337,10 @@ pub fn smoltcp_poll_loop(
                             EgressEvaluation::Deny => false,
                         },
                     };
+                    eprintln!("[stack] TcpSyn allow={allow}");
                     if allow && !conn_tracker.has_socket_for(&src, &dst) {
-                        conn_tracker.create_tcp_socket(src, dst, &mut sockets);
+                        let created = conn_tracker.create_tcp_socket(src, dst, &mut sockets);
+                        eprintln!("[stack] create_tcp_socket created={created}");
                     }
                     // Let smoltcp process — matching socket completes
                     // handshake, no socket means auto-RST.
