@@ -107,9 +107,6 @@ pub fn classify_frame(frame: &[u8]) -> FrameAction {
         return FrameAction::Passthrough;
     };
 
-    if eth.ethertype() == EthernetProtocol::Ipv6 {
-        eprintln!("[classify] IPv6 frame len={}", frame.len());
-    }
     match eth.ethertype() {
         EthernetProtocol::Ipv4 => classify_ipv4(eth.payload()),
         EthernetProtocol::Ipv6 => classify_ipv6(eth.payload()),
@@ -297,7 +294,6 @@ pub fn smoltcp_poll_loop(
 
             match classify_frame(frame) {
                 FrameAction::TcpSyn { src, dst } => {
-                    eprintln!("[stack] TcpSyn src={src} dst={dst}");
                     let allow = match DnsPortType::from_tcp(dst.port()) {
                         // Plain DNS: the interceptor enforces policy at
                         // the application layer (block list + rebind
@@ -340,10 +336,8 @@ pub fn smoltcp_poll_loop(
                             EgressEvaluation::Deny => false,
                         },
                     };
-                    eprintln!("[stack] TcpSyn allow={allow}");
                     if allow && !conn_tracker.has_socket_for(&src, &dst) {
-                        let created = conn_tracker.create_tcp_socket(src, dst, &mut sockets);
-                        eprintln!("[stack] create_tcp_socket created={created}");
+                        conn_tracker.create_tcp_socket(src, dst, &mut sockets);
                     }
                     // Let smoltcp process — matching socket completes
                     // handshake, no socket means auto-RST.
@@ -447,7 +441,6 @@ pub fn smoltcp_poll_loop(
         // Detect newly-established connections and spawn proxy tasks.
         let new_conns = conn_tracker.take_new_connections(&mut sockets);
         for conn in new_conns {
-            eprintln!("[stack] new_conn dst={}", conn.dst);
             if let Some(ref tls_state) = tls_state
                 && tls_state
                     .config
@@ -780,15 +773,8 @@ fn classify_ipv4(payload: &[u8]) -> FrameAction {
 /// Classify an IPv6 packet payload (after stripping the Ethernet header).
 fn classify_ipv6(payload: &[u8]) -> FrameAction {
     let Ok(ipv6) = Ipv6Packet::new_checked(payload) else {
-        eprintln!("[classify_ipv6] bad packet len={}", payload.len());
         return FrameAction::Passthrough;
     };
-    eprintln!(
-        "[classify_ipv6] next_header={:?} src={} dst={}",
-        ipv6.next_header(),
-        ipv6.src_addr(),
-        ipv6.dst_addr()
-    );
     classify_transport(
         ipv6.next_header(),
         ipv6.src_addr().into(),

@@ -147,7 +147,6 @@ pub fn spawn_tcp_proxy(
     gateway: GatewayIps,
     upstream_connected: Arc<AtomicBool>,
 ) {
-    eprintln!("[tcp_proxy] spawn guest={guest_dst} connect={connect_dst}");
     handle.spawn(async move {
         if let Err(e) = tcp_proxy_task(
             guest_dst,
@@ -195,7 +194,6 @@ async fn tcp_proxy_task(
             None => return Ok(()), // channel closed before any data
         };
         let first_byte = first_chunk[0];
-        eprintln!("[proxy] first_byte=0x{first_byte:02x} dst={connect_dst}");
         if first_chunk.len() > 1 {
             // Put the remainder back into a new channel so the receiver we
             // pass to SOCKS handlers / peek_for_sni sees a contiguous stream.
@@ -232,7 +230,6 @@ async fn tcp_proxy_task(
         }
         0x05 => {
             // SOCKS5
-            eprintln!("[proxy] dispatching SOCKS5 for {connect_dst}");
             return handle_socks5(
                 ChannelReader::new(from_smoltcp),
                 to_smoltcp,
@@ -447,7 +444,6 @@ async fn handle_socks5(
         return Ok(());
     }
     // Select no-auth (0x00).
-    eprintln!("[socks5] auth ok, sending method selection");
     to_smoltcp
         .send(Bytes::from_static(&[0x05, 0x00]))
         .await
@@ -524,7 +520,6 @@ async fn handle_socks5(
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "to_smoltcp closed"))?;
     shared.proxy_wake.wake();
 
-    eprintln!("[socks5] CONNECT reply sent, target={target_host}:{dst_port}");
     let (from_smoltcp, leftover) = reader.into_parts();
 
     dispatch_socks_tunnel(
@@ -563,14 +558,12 @@ async fn dispatch_socks_tunnel(
     upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let connect_dst = resolve_socks_dst(&target_host, target_port, gateway)?;
-    eprintln!("[dispatch] target={target_host}:{target_port} connect_dst={connect_dst}");
 
     // Check whether this port should be TLS-intercepted.
     let should_intercept = tls_state
         .as_ref()
         .is_some_and(|ts| ts.config.intercepted_ports.contains(&target_port));
 
-    eprintln!("[dispatch] should_intercept={should_intercept}");
     if should_intercept {
         let ts = tls_state.unwrap();
         // If the negotiation left bytes buffered, replay them into the channel
@@ -600,7 +593,6 @@ async fn dispatch_socks_tunnel(
         // (so policy rules match the right name/IP). connect_dst is the resolved
         // host-side address.
         let socks_guest_dst = SocketAddr::new(connect_dst.ip(), target_port);
-        eprintln!("[dispatch] spawning tls_proxy guest={socks_guest_dst} connect={connect_dst}");
         let handle = tls_proxy::spawn_tls_proxy(
             &tokio::runtime::Handle::current(),
             socks_guest_dst,
@@ -612,7 +604,6 @@ async fn dispatch_socks_tunnel(
             network_policy,
             upstream_connected,
         );
-        eprintln!("[dispatch] tls_proxy spawned, awaiting");
         let _ = handle.await;
         return Ok(());
     }

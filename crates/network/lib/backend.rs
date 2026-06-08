@@ -61,13 +61,6 @@ impl NetBackend for SmoltcpBackend {
     /// the raw ethernet frame for smoltcp.
     fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<(), WriteError> {
         let ethernet_frame = buf[hdr_len..].to_vec();
-        // Log ethertype for IPv6 frames (ethertype is at bytes 12-13 of ethernet frame)
-        if ethernet_frame.len() >= 14 {
-            let et = u16::from_be_bytes([ethernet_frame[12], ethernet_frame[13]]);
-            if et == 0x86DD {
-                eprintln!("[backend] IPv6 frame len={}", ethernet_frame.len());
-            }
-        }
         self.shared.add_tx_bytes(ethernet_frame.len());
         self.shared
             .tx_ring

@@ -33,7 +33,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use hickory_client::client::Client;
 use hickory_client::proto::op::{Message, ResponseCode};
-use hickory_client::proto::rr::rdata::{A, AAAA};
+use hickory_client::proto::rr::rdata::A;
 use hickory_client::proto::rr::{RData, Record, RecordType};
 use hickory_client::proto::serialize::binary::{BinDecodable, BinEncodable};
 use hickory_client::proto::xfer::{DnsHandle, DnsRequest};
@@ -553,9 +553,12 @@ fn synthesize_host_alias_response(
     let question = query.queries().first()?;
     let name = question.name().clone();
 
+    // Only synthesize A records for the host alias. The virtio-net backend
+    // does not deliver IPv6 frames from the guest, so an AAAA answer would
+    // resolve to an unreachable gateway IPv6 address and cause a ~75s
+    // Happy Eyeballs connect timeout before falling back to the A record.
     let rdata = match qtype {
         RecordType::A => RData::A(A::from(gateway.ipv4?)),
-        RecordType::AAAA => RData::AAAA(AAAA::from(gateway.ipv6?)),
         _ => return None,
     };
 
