@@ -340,6 +340,7 @@ async fn socks4a_substitutes_secret_in_authorization_header() {
     let socks_port = socks.port();
     let name = "socks4a-secret-auth";
 
+    eprintln!("[4a] calling create https_port={https_port} socks_port={socks_port}");
     let sb = Sandbox::builder(name)
         .image(CURL_IMAGE)
         .cpus(1)
@@ -359,11 +360,13 @@ async fn socks4a_substitutes_secret_in_authorization_header() {
         .create()
         .await
         .expect("create sandbox");
+    eprintln!("[4a] create done, calling shell");
 
     let out = sb
         .shell(format!(
             r#"set -eu
-curl -k --http1.1 -m 30 -sS -o /dev/null \
+echo RUNNING >&2
+curl -k --http1.1 -m 30 -v -o /dev/null \
   -w 'code=%{{http_code}}' \
   --socks4a {HOST_ALIAS}:{socks_port} \
   -H "Authorization: Bearer $API_KEY" \
@@ -373,6 +376,11 @@ curl -k --http1.1 -m 30 -sS -o /dev/null \
         .await
         .expect("shell");
 
+    eprintln!(
+        "[4a] shell done stdout={:?} stderr={:?}",
+        out.stdout(),
+        out.stderr()
+    );
     let stdout = out.stdout().expect("utf8 stdout");
     assert!(
         stdout.contains("code=200"),
