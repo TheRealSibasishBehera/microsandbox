@@ -66,7 +66,7 @@ pub fn spawn_tls_proxy(
     tls_state: Arc<TlsState>,
     network_policy: Arc<NetworkPolicy>,
     upstream_connected: Arc<AtomicBool>,
-) {
+) -> tokio::task::JoinHandle<()> {
     handle.spawn(async move {
         let context = TlsProxyContext {
             guest_dst,
@@ -80,7 +80,7 @@ pub fn spawn_tls_proxy(
         if let Err(e) = tls_proxy_task(context, from_smoltcp, to_smoltcp).await {
             tracing::debug!(dst = %connect_dst, guest_dst = %guest_dst, error = %e, "TLS proxy task ended");
         }
-    });
+    })
 }
 
 /// Core TLS proxy task.

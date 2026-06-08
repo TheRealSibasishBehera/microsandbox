@@ -597,7 +597,7 @@ async fn dispatch_socks_tunnel(
         // host-side address.
         let socks_guest_dst = SocketAddr::new(connect_dst.ip(), target_port);
         eprintln!("[dispatch] spawning tls_proxy guest={socks_guest_dst} connect={connect_dst}");
-        tls_proxy::spawn_tls_proxy(
+        let handle = tls_proxy::spawn_tls_proxy(
             &tokio::runtime::Handle::current(),
             socks_guest_dst,
             connect_dst,
@@ -608,7 +608,8 @@ async fn dispatch_socks_tunnel(
             network_policy,
             upstream_connected,
         );
-        eprintln!("[dispatch] tls_proxy spawned");
+        eprintln!("[dispatch] tls_proxy spawned, awaiting");
+        let _ = handle.await;
         return Ok(());
     }
 
