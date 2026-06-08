@@ -590,7 +590,7 @@ async fn dispatch_socks_tunnel(
         // (so policy rules match the right name/IP). connect_dst is the resolved
         // host-side address.
         let socks_guest_dst = SocketAddr::new(connect_dst.ip(), target_port);
-        tls_proxy::spawn_tls_proxy(
+        let handle = tls_proxy::spawn_tls_proxy(
             &tokio::runtime::Handle::current(),
             socks_guest_dst,
             connect_dst,
@@ -601,6 +601,7 @@ async fn dispatch_socks_tunnel(
             network_policy,
             upstream_connected,
         );
+        let _ = handle.await;
         return Ok(());
     }
 
