@@ -292,6 +292,8 @@ async fn socks5_plain_relay_without_secrets() {
     let socks_port = socks.port();
     let name = "socks5-plain-relay";
 
+    eprintln!("[test] https_port={https_port} socks_port={socks_port}");
+
     let sb = Sandbox::builder(name)
         .image(CURL_IMAGE)
         .cpus(1)
@@ -306,10 +308,12 @@ async fn socks5_plain_relay_without_secrets() {
         .await
         .expect("create sandbox");
 
+    eprintln!("[test] sandbox created, calling shell");
     let out = sb
         .shell(format!(
             r#"set -eu
-curl -k --http1.1 -m 30 -sS -o /dev/null \
+echo RUNNING >&2
+curl -k --http1.1 -m 30 -v -o /dev/null \
   -w 'code=%{{http_code}}' \
   --socks5-hostname {HOST_ALIAS}:{socks_port} \
   https://{HOST_ALIAS}:{https_port}/
@@ -317,6 +321,11 @@ curl -k --http1.1 -m 30 -sS -o /dev/null \
         ))
         .await
         .expect("shell");
+    eprintln!(
+        "[test] shell returned stdout={:?} stderr={:?}",
+        out.stdout(),
+        out.stderr()
+    );
 
     let stdout = out.stdout().expect("utf8 stdout");
     assert!(
