@@ -522,6 +522,8 @@ pub fn smoltcp_poll_loop(
                 conn.to_smoltcp,
                 shared.clone(),
                 network_policy.clone(),
+                tls_state.clone(),
+                config.gateway,
                 conn.upstream_connected,
             );
         }
