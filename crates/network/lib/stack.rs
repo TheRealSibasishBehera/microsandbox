@@ -107,6 +107,9 @@ pub fn classify_frame(frame: &[u8]) -> FrameAction {
         return FrameAction::Passthrough;
     };
 
+    if eth.ethertype() == EthernetProtocol::Ipv6 {
+        eprintln!("[classify] IPv6 frame len={}", frame.len());
+    }
     match eth.ethertype() {
         EthernetProtocol::Ipv4 => classify_ipv4(eth.payload()),
         EthernetProtocol::Ipv6 => classify_ipv6(eth.payload()),
@@ -777,8 +780,15 @@ fn classify_ipv4(payload: &[u8]) -> FrameAction {
 /// Classify an IPv6 packet payload (after stripping the Ethernet header).
 fn classify_ipv6(payload: &[u8]) -> FrameAction {
     let Ok(ipv6) = Ipv6Packet::new_checked(payload) else {
+        eprintln!("[classify_ipv6] bad packet len={}", payload.len());
         return FrameAction::Passthrough;
     };
+    eprintln!(
+        "[classify_ipv6] next_header={:?} src={} dst={}",
+        ipv6.next_header(),
+        ipv6.src_addr(),
+        ipv6.dst_addr()
+    );
     classify_transport(
         ipv6.next_header(),
         ipv6.src_addr().into(),
