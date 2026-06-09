@@ -486,3 +486,59 @@ curl -6 -k --http1.1 -m 30 -sS -o /dev/null \
 
     teardown(sb, name).await;
 }
+
+/// Diagnostic probe: capture the IPv6 address state timeline inside the guest.
+///
+/// Logs address flags at T=0,1,3,8s after boot to determine:
+/// - whether DAD completes (tentative → preferred)
+/// - whether the guest sends Router Solicitations
+/// - whether the gateway responds with Router Advertisements
+///
+/// Run with: cargo nextest run -p microsandbox --tests --run-ignored=only -E 'test(probe_ipv6_dad)'
+#[msb_test]
+#[ignore = "diagnostic probe — not a regression test"]
+async fn probe_ipv6_dad_timeline() {
+    let name = "probe-ipv6-dad";
+    let sb = Sandbox::builder(name)
+        .image(CURL_IMAGE)
+        .cpus(1)
+        .memory(256)
+        .user("0")
+        .replace()
+        .network(|n| n.policy(NetworkPolicy::allow_all()))
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let out = sb
+        .shell(
+            r#"set -eu
+echo "=== T=0 ==="
+ip -6 addr show dev eth0
+cat /proc/net/snmp6 | grep -E 'Icmp6OutRouterSolicits|Icmp6InRouterAdvertisements|Icmp6OutNeighborSolicits|Icmp6InNeighborAdvertisements'
+sleep 1
+echo "=== T=1 ==="
+ip -6 addr show dev eth0
+cat /proc/net/snmp6 | grep -E 'Icmp6OutRouterSolicits|Icmp6InRouterAdvertisements|Icmp6OutNeighborSolicits|Icmp6InNeighborAdvertisements'
+sleep 2
+echo "=== T=3 ==="
+ip -6 addr show dev eth0
+cat /proc/net/snmp6 | grep -E 'Icmp6OutRouterSolicits|Icmp6InRouterAdvertisements|Icmp6OutNeighborSolicits|Icmp6InNeighborAdvertisements'
+sleep 5
+echo "=== T=8 ==="
+ip -6 addr show dev eth0
+cat /proc/net/snmp6 | grep -E 'Icmp6OutRouterSolicits|Icmp6InRouterAdvertisements|Icmp6OutNeighborSolicits|Icmp6InNeighborAdvertisements'
+"#,
+        )
+        .await
+        .expect("shell");
+
+    let stdout = out.stdout().unwrap_or_default();
+    let stderr = out.stderr().unwrap_or_default();
+    eprintln!("=== IPv6 DAD timeline ===\n{stdout}");
+    if !stderr.is_empty() {
+        eprintln!("=== stderr ===\n{stderr}");
+    }
+
+    teardown(sb, name).await;
+}
