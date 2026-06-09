@@ -54,6 +54,13 @@ struct HostSocks {
     handle: Option<JoinHandle<()>>,
 }
 
+/// Which loopback family the in-process SOCKS proxy uses to reach `HostHttps`.
+#[derive(Clone, Copy)]
+enum LoopbackFamily {
+    V4,
+    V6,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -106,7 +113,7 @@ impl Drop for HostHttps {
 impl HostSocks {
     /// Start a SOCKS5 proxy that forwards all CONNECT tunnels to `target_port`
     /// on loopback (where `HostHttps` is listening).
-    async fn start(target_port: u16) -> io::Result<Self> {
+    async fn start(target_port: u16, inner_family: LoopbackFamily) -> io::Result<Self> {
         let v4 = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
         let port = v4.local_addr()?.port();
         let v6 = TcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port))).await?;
@@ -117,7 +124,7 @@ impl HostSocks {
                 a = v4.accept() => a.expect("socks v4 accept"),
                 a = v6.accept() => a.expect("socks v6 accept"),
             };
-            if let Err(e) = serve_socks5(stream, target_port).await {
+            if let Err(e) = serve_socks5(stream, target_port, inner_family).await {
                 eprintln!("HostSocks error: {e}");
             }
         });
@@ -146,7 +153,11 @@ impl Drop for HostSocks {
 //--------------------------------------------------------------------------------------------------
 
 /// Handle one SOCKS5 connection: complete the handshake then pipe to `target_port`.
-async fn serve_socks5(stream: TcpStream, target_port: u16) -> SocksResult<()> {
+async fn serve_socks5(
+    stream: TcpStream,
+    target_port: u16,
+    inner_family: LoopbackFamily,
+) -> SocksResult<()> {
     let (proto, cmd, _target_addr) = Socks5ServerProtocol::accept_no_auth(stream)
         .await?
         .read_command()
@@ -159,7 +170,14 @@ async fn serve_socks5(stream: TcpStream, target_port: u16) -> SocksResult<()> {
             // Ignore the SOCKS CONNECT target — always pipe to the in-process
             // HostHttps so the test stays self-contained. Microsandbox intercepts
             // transparently and substitutes secrets before bytes leave the host.
-            let target = TargetAddr::Ip(SocketAddr::from((Ipv4Addr::LOCALHOST, target_port)));
+            let target = match inner_family {
+                LoopbackFamily::V4 => {
+                    TargetAddr::Ip(SocketAddr::from((Ipv4Addr::LOCALHOST, target_port)))
+                }
+                LoopbackFamily::V6 => {
+                    TargetAddr::Ip(SocketAddr::from((Ipv6Addr::LOCALHOST, target_port)))
+                }
+            };
             run_tcp_proxy(proto, &target, std::time::Duration::from_secs(30), false).await?;
         }
         _ => {
@@ -224,7 +242,9 @@ async fn teardown(sb: Sandbox, name: &str) {
 async fn socks5_substitutes_secret_in_authorization_header() {
     let mut server = HostHttps::start().await.expect("https fixture");
     let https_port = server.port();
-    let socks = HostSocks::start(https_port).await.expect("socks fixture");
+    let socks = HostSocks::start(https_port, LoopbackFamily::V4)
+        .await
+        .expect("socks fixture");
     let socks_port = socks.port();
     let name = "socks5-secret-auth";
 
@@ -288,7 +308,9 @@ curl -4 -k --http1.1 -m 30 -sS -o /dev/null \
 async fn socks5_plain_relay_without_secrets() {
     let mut server = HostHttps::start().await.expect("https fixture");
     let https_port = server.port();
-    let socks = HostSocks::start(https_port).await.expect("socks fixture");
+    let socks = HostSocks::start(https_port, LoopbackFamily::V4)
+        .await
+        .expect("socks fixture");
     let socks_port = socks.port();
     let name = "socks5-plain-relay";
 
@@ -336,7 +358,9 @@ curl -4 -k --http1.1 -m 30 -sS -o /dev/null \
 async fn socks4a_substitutes_secret_in_authorization_header() {
     let mut server = HostHttps::start().await.expect("https fixture");
     let https_port = server.port();
-    let socks = HostSocks::start(https_port).await.expect("socks fixture");
+    let socks = HostSocks::start(https_port, LoopbackFamily::V4)
+        .await
+        .expect("socks fixture");
     let socks_port = socks.port();
     let name = "socks4a-secret-auth";
 
@@ -366,6 +390,75 @@ async fn socks4a_substitutes_secret_in_authorization_header() {
 curl -4 -k --http1.1 -m 30 -sS -o /dev/null \
   -w 'code=%{{http_code}}' \
   --socks4a {HOST_ALIAS}:{socks_port} \
+  -H "Authorization: Bearer $API_KEY" \
+  https://{HOST_ALIAS}:{https_port}/
+"#
+        ))
+        .await
+        .expect("shell");
+
+    let stdout = out.stdout().expect("utf8 stdout");
+    assert!(
+        stdout.contains("code=200"),
+        "expected 200, got: {stdout}\nstderr: {}",
+        out.stderr().unwrap_or_default()
+    );
+
+    let headers = server.received_headers().await.expect("read headers");
+    let headers_str = String::from_utf8_lossy(&headers);
+    assert!(
+        headers_str.contains(&format!("Authorization: Bearer {REAL_SECRET}")),
+        "real secret must reach server, got:\n{headers_str}"
+    );
+    assert!(
+        !headers_str.contains("$MSB_"),
+        "placeholder must not reach server, got:\n{headers_str}"
+    );
+
+    teardown(sb, name).await;
+}
+
+/// Guest routes HTTPS through a SOCKS5 proxy over IPv6; secret must be substituted.
+///
+/// curl -6 forces the guest to use the AAAA record for host.microsandbox.internal
+/// (the gateway IPv6) for both the SOCKS proxy connection and the inner TLS target.
+/// Secret substitution must still work end-to-end over the IPv6 path.
+#[msb_test]
+async fn socks5_substitutes_secret_over_ipv6() {
+    let mut server = HostHttps::start().await.expect("https fixture");
+    let https_port = server.port();
+    let socks = HostSocks::start(https_port, LoopbackFamily::V6)
+        .await
+        .expect("socks fixture");
+    let socks_port = socks.port();
+    let name = "socks5-secret-auth-v6";
+
+    let sb = Sandbox::builder(name)
+        .image(CURL_IMAGE)
+        .cpus(1)
+        .memory(256)
+        .user("0")
+        .replace()
+        .secret(|s| {
+            s.env("API_KEY")
+                .value(REAL_SECRET)
+                .allow_host(HOST_ALIAS)
+                .inject_headers(true)
+        })
+        .network(|n| {
+            n.policy(NetworkPolicy::allow_all())
+                .tls(|t| t.intercepted_ports(vec![https_port]).verify_upstream(false))
+        })
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let out = sb
+        .shell(format!(
+            r#"set -eu
+curl -6 -k --http1.1 -m 30 -sS -o /dev/null \
+  -w 'code=%{{http_code}}' \
+  --socks5-hostname {HOST_ALIAS}:{socks_port} \
   -H "Authorization: Bearer $API_KEY" \
   https://{HOST_ALIAS}:{https_port}/
 "#
