@@ -251,7 +251,7 @@ async fn socks5_substitutes_secret_in_authorization_header() {
     let out = sb
         .shell(format!(
             r#"set -eu
-curl -k --http1.1 -m 30 -sS -o /dev/null \
+curl -4 -k --http1.1 -m 30 -sS -o /dev/null \
   -w 'code=%{{http_code}}' \
   --socks5-hostname {HOST_ALIAS}:{socks_port} \
   -H "Authorization: Bearer $API_KEY" \
@@ -309,7 +309,7 @@ async fn socks5_plain_relay_without_secrets() {
     let out = sb
         .shell(format!(
             r#"set -eu
-curl -k --http1.1 -m 30 -sS -o /dev/null \
+curl -4 -k --http1.1 -m 30 -sS -o /dev/null \
   -w 'code=%{{http_code}}' \
   --socks5-hostname {HOST_ALIAS}:{socks_port} \
   https://{HOST_ALIAS}:{https_port}/
@@ -363,7 +363,7 @@ async fn socks4a_substitutes_secret_in_authorization_header() {
     let out = sb
         .shell(format!(
             r#"set -eu
-curl -k --http1.1 -m 30 -sS -o /dev/null \
+curl -4 -k --http1.1 -m 30 -sS -o /dev/null \
   -w 'code=%{{http_code}}' \
   --socks4a {HOST_ALIAS}:{socks_port} \
   -H "Authorization: Bearer $API_KEY" \
