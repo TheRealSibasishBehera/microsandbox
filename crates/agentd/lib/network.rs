@@ -409,7 +409,11 @@ mod linux {
         unsafe {
             (*ifa).ifa_family = family;
             (*ifa).ifa_prefixlen = prefix_len;
-            (*ifa).ifa_flags = 0;
+            // Skip DAD for IPv6: in a single-guest virtual network there is no
+            // other host that could own the same address. DAD keeps the address
+            // tentative for ~1 s and, in this environment, the NDP exchange
+            // never completes — leaving the address permanently tentative.
+            (*ifa).ifa_flags = if is_ipv4 { 0 } else { 0x02 }; // 0x02 = IFA_F_NODAD
             (*ifa).ifa_index = ifindex;
             (*ifa).ifa_scope = libc::RT_SCOPE_UNIVERSE;
         }
