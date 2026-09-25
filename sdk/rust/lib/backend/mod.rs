@@ -31,6 +31,7 @@ pub(crate) use local::ControlSession;
 mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
+pub(crate) mod secret;
 pub(crate) mod snapshot;
 pub(crate) mod volume;
 
@@ -48,6 +49,10 @@ pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudSecretDisposition, CloudSecretMetadata, CloudSecretMetadataList,
+    CloudSecretOperationStatus, CloudSecretRotationError, CloudSecretRotationRequest,
+    CloudSecretRotationResult, SecretDisposition, SecretMetadata, SecretRotationRequest,
+    SecretRotationResult,
 };
 pub use profile::{Profile, ProfileBackend, resolve_default_backend};
 pub use sandbox::{
@@ -55,6 +60,7 @@ pub use sandbox::{
     SandboxIdentity, SandboxInner,
 };
 pub use sandbox::{SandboxHandleLocalState, SandboxLocalState};
+pub use secret::SecretBackend;
 pub use snapshot::SnapshotBackend;
 pub use volume::{
     CloudVolumeKind, CloudVolumeStatus, VolumeBackend, VolumeCloudState, VolumeHandleCloudState,
@@ -254,6 +260,15 @@ tokio::task_local! {
 mod tests {
     use super::*;
 
+    /// Every accessor must stay callable through the erased handle type the
+    /// SDK stores, so none of the sub-traits may grow a non-object-safe method.
+    #[test]
+    fn resource_backends_are_reachable_through_an_erased_backend() {
+        let backend: Arc<dyn Backend> = default_backend();
+        let _: &dyn SecretBackend = backend.secrets();
+        let _: &dyn SnapshotBackend = backend.snapshots();
+    }
+
     #[test]
     fn default_backend_resolves_to_local_when_unset() {
         // Each `cargo test` run is its own process, but other tests in the
@@ -280,6 +295,10 @@ mod tests {
             }
 
             fn snapshots(&self) -> &dyn SnapshotBackend {
+                unimplemented!("fake backend only tests kind routing")
+            }
+
+            fn secrets(&self) -> &dyn SecretBackend {
                 unimplemented!("fake backend only tests kind routing")
             }
         }
@@ -311,6 +330,10 @@ mod tests {
             }
 
             fn snapshots(&self) -> &dyn SnapshotBackend {
+                unimplemented!("fake backend only tests kind routing")
+            }
+
+            fn secrets(&self) -> &dyn SecretBackend {
                 unimplemented!("fake backend only tests kind routing")
             }
         }

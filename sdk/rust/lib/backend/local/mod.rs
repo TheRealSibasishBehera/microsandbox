@@ -19,6 +19,7 @@ mod control;
 mod control_lookup;
 mod database;
 mod sandbox;
+mod secret;
 pub(crate) mod snapshot;
 
 #[cfg(feature = "fuzzing")]
@@ -49,7 +50,7 @@ use tokio::sync::OnceCell;
 use super::{
     Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
 };
-use crate::backend::SnapshotBackend;
+use crate::backend::{SecretBackend, SnapshotBackend};
 use crate::config::{
     DatabaseConfig, GlobalConfig, GlobalConfigPatch, RegistryConfig, RegistryEntry,
     RegistryOptions, RegistrySettingsPatch, layers::BackendConfig,
@@ -517,6 +518,10 @@ impl Backend for LocalBackend {
     }
 
     fn snapshots(&self) -> &dyn SnapshotBackend {
+        self
+    }
+
+    fn secrets(&self) -> &dyn SecretBackend {
         self
     }
 

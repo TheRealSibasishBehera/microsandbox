@@ -19,12 +19,16 @@ use crate::{
     CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
     CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
     CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
-    CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation,
-    CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction,
-    CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar, HandoffInit,
-    HostPermissions, MountOptions, NetworkPolicy, OwnedVolumeStorage, PortRange, Protocol, Rule,
-    SandboxLogLevel, SandboxPolicy, SecretSubstitution, SecurityProfile, StatVirtualization,
+    CloudSandboxStatusReason, CloudSecretDisposition, CloudSecretEntry, CloudSecretMetadata,
+    CloudSecretMetadataList, CloudSecretOperationStatus, CloudSecretRotationError,
+    CloudSecretRotationOperation, CloudSecretRotationRequest, CloudSecretRotationResult,
+    CloudSecretSource, CloudSecretsConfig, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,
+    CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
+    CloudViolationAction, CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar,
+    HandoffInit, HostPermissions, MountOptions, NetworkPolicy, OwnedVolumeStorage, PortRange,
+    Protocol, Rule, SandboxLogLevel, SandboxPolicy, SecretDisposition, SecretMetadata,
+    SecretRotationRequest, SecretRotationResult, SecretSubstitution, SecurityProfile,
+    StatVirtualization,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -215,6 +219,18 @@ pub fn cloud_declarations() -> Vec<String> {
         CloudSnapshotOperation::decl(&cfg),
         CloudSnapshotOperationStatus::decl(&cfg),
         CloudSnapshotKind::decl(&cfg),
+        CloudSecretMetadata::decl(&cfg),
+        CloudSecretMetadataList::decl(&cfg),
+        CloudSecretRotationRequest::decl(&cfg),
+        CloudSecretRotationOperation::decl(&cfg),
+        CloudSecretRotationResult::decl(&cfg),
+        CloudSecretRotationError::decl(&cfg),
+        CloudSecretOperationStatus::decl(&cfg),
+        CloudSecretDisposition::decl(&cfg),
+        SecretMetadata::decl(&cfg),
+        SecretRotationRequest::decl(&cfg),
+        SecretRotationResult::decl(&cfg),
+        SecretDisposition::decl(&cfg),
         CloudPaginated::<CloudCreateSandboxResponse>::decl(&cfg),
         CloudMessageResponse::decl(&cfg),
         CloudErrorBody::decl(&cfg),
@@ -311,9 +327,9 @@ mod tests {
 
     #[test]
     fn cloud_bindings_import_domain_and_stay_scoped() {
-        assert_eq!(domain_declarations().len(), 17);
+        assert_eq!(domain_declarations().len(), 18);
         assert_eq!(snapshot_declarations().len(), 9);
-        assert_eq!(cloud_declarations().len(), 33);
+        assert_eq!(cloud_declarations().len(), 45);
 
         let cloud = render_cloud();
         // Cloud twins live here and their domain deps are imported/re-exported.

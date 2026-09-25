@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use futures::stream;
+use microsandbox_types::{SecretMetadata, SecretRotationRequest, SecretRotationResult};
 
 use super::sandbox::{LogStream, MetricsStream};
-use super::{Backend, BackendKind, SandboxBackend, SnapshotBackend, VolumeBackend};
+use super::{Backend, BackendKind, SandboxBackend, SecretBackend, SnapshotBackend, VolumeBackend};
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage};
@@ -79,6 +80,10 @@ impl Backend for ConfigurationErrorBackend {
     }
 
     fn snapshots(&self) -> &dyn SnapshotBackend {
+        self
+    }
+
+    fn secrets(&self) -> &dyn SecretBackend {
         self
     }
 
@@ -226,6 +231,26 @@ impl SandboxBackend for ConfigurationErrorBackend {
     ) -> MetricsStream {
         let error = self.error();
         Box::pin(stream::once(async move { Err(error) }))
+    }
+}
+
+impl SecretBackend for ConfigurationErrorBackend {
+    fn list<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _sandbox: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<SecretMetadata>>> {
+        self.fail()
+    }
+
+    fn rotate<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _sandbox: &'a str,
+        _name: &'a str,
+        _request: SecretRotationRequest,
+    ) -> BoxFuture<'a, MicrosandboxResult<SecretRotationResult>> {
+        self.fail()
     }
 }
 

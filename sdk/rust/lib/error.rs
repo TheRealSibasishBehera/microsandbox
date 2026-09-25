@@ -504,6 +504,10 @@ pub enum Operation {
     ImageLoad,
     /// `Image::save`.
     ImageSave,
+    /// `Secret::list`.
+    SecretList,
+    /// `Secret::rotate`.
+    SecretRotate,
     /// Snapshot operations (`Snapshot::*`).
     SnapshotOps,
     /// The free function `config` (ambient local-config accessor).
@@ -611,6 +615,8 @@ impl Operation {
             Operation::ImagePrune => "Image::prune",
             Operation::ImageLoad => "Image::load",
             Operation::ImageSave => "Image::save",
+            Operation::SecretList => "Secret::list",
+            Operation::SecretRotate => "Secret::rotate",
             Operation::SnapshotOps => "snapshot operations",
             Operation::Config => "config",
         }

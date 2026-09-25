@@ -5538,6 +5538,54 @@ mod tests {
         assert!(!message.contains(VALUE_SENTINEL));
     }
 
+    /// A rotation that also narrows allowed hosts must travel as ONE
+    /// `SecretsUpdate`: split in two, the value can land while the host
+    /// restriction fails, leaving fresh material under a stale allow-list.
+    #[cfg(feature = "net")]
+    #[test]
+    fn a_rotation_with_new_hosts_travels_as_one_batch() {
+        let config = config_with_secret("API_KEY", SECRET_SENTINEL);
+        let patch = patch_with_specs(vec![SecretModificationPatch {
+            name: "API_KEY".to_string(),
+            value: zeroize::Zeroizing::new("rotated".to_string()),
+            allowed_hosts: vec!["api.example.com".to_string()],
+            ..SecretModificationPatch::default()
+        }]);
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config,
+            None,
+            LiveControl {
+                root_disk_grow: false,
+                cpu_resize: false,
+                memory_resize: false,
+                secrets: true,
+            },
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+
+        let updates = live_secret_updates(&plan, &patch).unwrap();
+
+        assert_eq!(
+            updates.len(),
+            2,
+            "both changes belong in one batch, got {updates:?}"
+        );
+        assert!(matches!(
+            &updates[0],
+            microsandbox_runtime::control::SecretLiveChange::Rotate { name, .. }
+                if name == "API_KEY"
+        ));
+        assert!(matches!(
+            &updates[1],
+            microsandbox_runtime::control::SecretLiveChange::SetAllowedHosts { name, hosts }
+                if name == "API_KEY" && hosts == &vec!["api.example.com".to_string()]
+        ));
+    }
+
     #[cfg(feature = "net")]
     #[test]
     fn live_secret_updates_cover_only_live_dispositions() {

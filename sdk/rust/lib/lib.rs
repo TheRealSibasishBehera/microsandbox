@@ -26,6 +26,7 @@ pub mod progress;
 #[cfg(feature = "local")]
 pub mod runtime;
 pub mod sandbox;
+pub mod secret;
 #[cfg(feature = "local")]
 pub mod setup;
 pub mod snapshot;
@@ -40,9 +41,10 @@ pub use backend::{
     CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
     CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason, CloudVolumeKind,
     CloudVolumeStatus, Profile, ProfileBackend, SandboxBackend, SandboxCloudState,
-    SandboxHandleCloudState, SandboxHandleInner, SandboxInner, VolumeBackend, VolumeCloudState,
-    VolumeHandleCloudState, VolumeHandleInner, VolumeInner, default_backend, default_backend_info,
-    resolve_default_backend, set_default_backend, swap_default_backend, with_backend,
+    SandboxHandleCloudState, SandboxHandleInner, SandboxInner, SecretBackend, VolumeBackend,
+    VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner, VolumeInner, default_backend,
+    default_backend_info, resolve_default_backend, set_default_backend, swap_default_backend,
+    with_backend,
 };
 #[cfg(feature = "cloud")]
 pub use backend::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
@@ -95,6 +97,10 @@ pub use sandbox::{
     SandboxListBuilder, SandboxMetrics, SandboxPage, SandboxPingResult, SandboxPolicyPatch,
     SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxSpecPatch, SandboxTouchResult,
     VsockSpecPatch, validate_sandbox_name,
+};
+pub use secret::{
+    Secret, SecretDisposition, SecretMetadata, SecretRotationBuilder, SecretRotationRequest,
+    SecretRotationResult,
 };
 pub use snapshot::{
     CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts,

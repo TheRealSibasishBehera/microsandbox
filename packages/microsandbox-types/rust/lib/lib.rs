@@ -14,6 +14,7 @@ mod guest_flush;
 pub mod helpers;
 pub mod modify;
 mod registry;
+pub mod secret;
 pub mod snapshot;
 mod validation;
 
@@ -32,10 +33,13 @@ pub use cloud::{
     CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
     CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
     CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
-    CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation,
-    CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction,
-    CloudVolumeMount,
+    CloudSandboxStatusReason, CloudSecretDisposition, CloudSecretEntry, CloudSecretMetadata,
+    CloudSecretMetadataList, CloudSecretOperationStatus, CloudSecretRotationError,
+    CloudSecretRotationOperation, CloudSecretRotationRequest, CloudSecretRotationResult,
+    CloudSecretSource, CloudSecretsConfig, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,
+    CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
+    CloudViolationAction, CloudVolumeMount, is_secret_version_shaped, secret_version,
+    verify_secret_version,
 };
 #[doc(hidden)]
 pub use command::{CommandResolutionError, ResolvedCommand, resolve_default_command};
@@ -67,6 +71,7 @@ pub use modify::{
     SecretModificationPatch, SecretPlannedChange, SecretSource,
 };
 pub use registry::RegistryAuth;
+pub use secret::{SecretDisposition, SecretMetadata, SecretRotationRequest, SecretRotationResult};
 pub use snapshot::manifest::Manifest as SnapshotManifest;
 pub use snapshot::{
     DiskCompactionDiskResult, DiskCompactionResult, DiskCompactionTarget,

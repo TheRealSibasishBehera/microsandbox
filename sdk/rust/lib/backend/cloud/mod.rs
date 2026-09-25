@@ -13,6 +13,7 @@
 mod agent;
 mod http;
 pub(in crate::backend) mod sandbox;
+mod secret;
 mod snapshot;
 mod volume;
 mod ws_io;

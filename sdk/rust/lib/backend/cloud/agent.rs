@@ -52,6 +52,10 @@ impl Backend for CloudBackend {
         self
     }
 
+    fn secrets(&self) -> &dyn crate::backend::SecretBackend {
+        self
+    }
+
     fn with_agent_identity(&self, name: &str, id: &str) -> Option<Arc<dyn Backend>> {
         let mut bound = self.clone();
         bound.agent_identity = Some((name.to_owned(), id.to_owned()));

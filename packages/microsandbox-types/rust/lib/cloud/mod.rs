@@ -28,7 +28,11 @@ mod snapshots;
 mod specs;
 
 pub use secrets::{
-    CloudHostPattern, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
+    CloudHostPattern, CloudSecretDisposition, CloudSecretEntry, CloudSecretMetadata,
+    CloudSecretMetadataList, CloudSecretOperationStatus, CloudSecretRotationError,
+    CloudSecretRotationOperation, CloudSecretRotationRequest, CloudSecretRotationResult,
+    CloudSecretSource, CloudSecretsConfig, CloudViolationAction, is_secret_version_shaped,
+    secret_version, verify_secret_version,
 };
 pub use snapshots::{
     CloudCreateSnapshotRequest, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,

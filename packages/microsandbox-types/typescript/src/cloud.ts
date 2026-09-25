@@ -687,7 +687,11 @@ export type CloudSecretEntry = {
    */
   source?: CloudSecretSource | null;
   /**
-   * Placeholder the sandbox sees instead of the real value.
+   * Explicit placeholder the sandbox sees instead of the real value.
+   *
+   * The field must be present on the wire. SDK builders may materialize a
+   * concrete default before serialization. Validation rejects empty,
+   * oversized, or line-breaking values.
    */
   placeholder: string;
   /**
@@ -992,6 +996,151 @@ export type CloudSnapshotOperationStatus =
   | "failed";
 
 export type CloudSnapshotKind = "disk";
+
+export type CloudSecretMetadata = {
+  /**
+   * The configured env var name, and the only identifier the contract
+   * exposes.
+   */
+  name: string;
+  /**
+   * Opaque current version token. It carries no ordering and decodes to
+   * nothing; the only operation defined on it is equality. Send it back as
+   * the `version` field of the next conditional update.
+   */
+  version: string;
+  /**
+   * The store's own timestamp for this version, never a local clock.
+   */
+  updated_at: string;
+};
+
+export type CloudSecretMetadataList = {
+  /**
+   * One entry per configured secret, ordered by name.
+   */
+  data: Array<CloudSecretMetadata>;
+};
+
+export type CloudSecretRotationRequest = {
+  /**
+   * New plaintext, at most 64 KiB of UTF-8 and never empty.
+   */
+  value: string;
+  /**
+   * Opaque version token the write is conditional on, as published by the
+   * metadata listing or a previous rotation result. Absent means no
+   * precondition was supplied, which the server refuses rather than writing
+   * unconditionally over a concurrent rotation.
+   */
+  version?: string | null;
+};
+
+export type CloudSecretRotationOperation = {
+  /**
+   * Server-generated operation id, issued only after acceptance. There is no
+   * caller-supplied identifier anywhere in this contract.
+   */
+  id: string;
+  /**
+   * Current operation status.
+   */
+  status: CloudSecretOperationStatus;
+  /**
+   * Present only when `status` is `succeeded`.
+   */
+  result: CloudSecretRotationResult | null;
+  /**
+   * Present only when `status` is `failed`.
+   */
+  error: CloudSecretRotationError | null;
+};
+
+export type CloudSecretRotationResult = {
+  /**
+   * Env var name that was rotated.
+   */
+  name: string;
+  /**
+   * Opaque token for the version the store committed. It is the
+   * precondition for the next conditional update, without another metadata
+   * read.
+   */
+  version: string;
+  /**
+   * How far the new version got toward the running runtime.
+   *
+   * The wire key stays `application`: this shape has shipped, so only the
+   * Rust-side name changed.
+   */
+  application: CloudSecretDisposition;
+};
+
+export type CloudSecretRotationError = {
+  /**
+   * Stable machine-readable code.
+   */
+  code: string;
+  /**
+   * Fixed human-readable text for that code.
+   */
+  message: string;
+};
+
+export type CloudSecretOperationStatus = "in_progress" | "succeeded" | "failed";
+
+export type CloudSecretDisposition =
+  | "applied"
+  | "on_next_start"
+  | "unconfirmed";
+
+export type SecretMetadata = {
+  /**
+   * The configured env var name, and the only identifier this exposes.
+   */
+  name: string;
+  /**
+   * Opaque: no ordering, nothing to decode, equality only. Quote it back on
+   * the next conditional rotation.
+   */
+  version: string;
+  /**
+   * The backend's own timestamp, never a local clock.
+   */
+  updated_at: string;
+};
+
+export type SecretRotationRequest = {
+  /**
+   * New plaintext, at most 64 KiB of UTF-8 and never empty.
+   */
+  value: string;
+  /**
+   * Absent means no precondition; what that licenses is the backend's call.
+   */
+  version?: string | null;
+};
+
+export type SecretRotationResult = {
+  /**
+   * The configured env var name this result reports on.
+   */
+  name: string;
+  /**
+   * The committed version, usable as the next precondition without a
+   * further metadata read.
+   */
+  version: string;
+  /**
+   * How far the new value reached: stored, or confirmed live.
+   *
+   * The wire key stays `application`: this shape has shipped, so only the
+   * Rust-side name changed.
+   */
+  application: SecretDisposition;
+};
+
+export type SecretDisposition = "applied" | "on_next_start" | "unconfirmed";
 
 export type CloudPaginated<T> = {
   /**
