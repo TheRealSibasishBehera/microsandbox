@@ -119,6 +119,7 @@ typedef char *(*msb_sandbox_handle_wait_until_stopped_fn)(uint64_t cancel_id, co
 typedef char *(*msb_sandbox_handle_ping_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_touch_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_modify_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_modify_identified_fn)(uint64_t cancel_id, const char *name, const char *expected_id, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_resume_modification_fn)(uint64_t cancel_id, const char *name, const char *expected_id, const char *operation_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_close_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
@@ -297,6 +298,7 @@ static msb_sandbox_handle_wait_until_stopped_fn ptr_msb_sandbox_handle_wait_unti
 static msb_sandbox_handle_ping_fn ptr_msb_sandbox_handle_ping = NULL;
 static msb_sandbox_handle_touch_fn ptr_msb_sandbox_handle_touch = NULL;
 static msb_sandbox_handle_modify_fn ptr_msb_sandbox_handle_modify = NULL;
+static msb_sandbox_handle_modify_identified_fn ptr_msb_sandbox_handle_modify_identified = NULL;
 static msb_sandbox_handle_resume_modification_fn ptr_msb_sandbox_handle_resume_modification = NULL;
 static msb_sandbox_close_fn      ptr_msb_sandbox_close      = NULL;
 static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
@@ -497,6 +499,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_handle_ping);
 	RESOLVE(msb_sandbox_handle_touch);
 	RESOLVE(msb_sandbox_handle_modify);
+	RESOLVE_OPTIONAL(msb_sandbox_handle_modify_identified);
 	RESOLVE_OPTIONAL(msb_sandbox_handle_resume_modification);
 	RESOLVE(msb_sandbox_close);
 	RESOLVE(msb_sandbox_detach);
@@ -715,8 +718,9 @@ char *call_msb_sandbox_handle_ping(uint64_t cancel_id, const char *name, uint8_t
 char *call_msb_sandbox_handle_touch(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_touch ? ptr_msb_sandbox_handle_touch(cancel_id, name, buf, buf_len) : NULL;
 }
-char *call_msb_sandbox_handle_modify(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_handle_modify ? ptr_msb_sandbox_handle_modify(cancel_id, name, opts_json, buf, buf_len) : NULL;
+bool has_identified_handle_modify(void) { return ptr_msb_sandbox_handle_modify_identified != NULL; }
+char *call_msb_sandbox_handle_modify_identified(uint64_t cancel_id, const char *name, const char *expected_id, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_modify_identified ? ptr_msb_sandbox_handle_modify_identified(cancel_id, name, expected_id, opts_json, buf, buf_len) : NULL;
 }
 bool has_modification_resume(void) {
 	return ptr_msb_sandbox_handle_resume_modification != NULL && ptr_msb_sandbox_resume_modification != NULL;
@@ -2628,21 +2632,30 @@ func TouchSandboxByName(ctx context.Context, name string) (*SandboxTouchResult, 
 	return &result, nil
 }
 
-// ModifySandboxByName plans or applies a sandbox modification by name.
-// optsJSON carries the canonical patch/policy/dry_run request; the raw
-// modification plan JSON is returned for the public package to decode.
-func ModifySandboxByName(ctx context.Context, name, optsJSON string) (string, error) {
+// ModifySandboxHandle plans or applies a sandbox modification by name,
+// refusing a sandbox whose identity is no longer expectedID. optsJSON carries
+// the canonical patch/policy/dry_run request; the raw modification plan JSON
+// is returned for the public package to decode.
+func ModifySandboxHandle(ctx context.Context, name, expectedID, optsJSON string) (string, error) {
 	if err := ensureLoaded(); err != nil {
 		return "", err
 	}
+	// The name-only symbol would modify whichever sandbox holds the name now.
+	if !bool(C.has_identified_handle_modify()) {
+		return "", errIdentifiedHandleModifyUnavailable
+	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
+	cExpectedID := C.CString(expectedID)
+	defer C.free(unsafe.Pointer(cExpectedID))
 	cOpts := C.CString(optsJSON)
 	defer C.free(unsafe.Pointer(cOpts))
 	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_handle_modify(cancelID, cName, cOpts, buf, bufLen)
+		return C.call_msb_sandbox_handle_modify_identified(cancelID, cName, cExpectedID, cOpts, buf, bufLen)
 	})
 }
+
+var errIdentifiedHandleModifyUnavailable = &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support modifying a sandbox handle by identity; update the native SDK"}
 
 // ResumeModificationByName keeps waiting for an unsettled modification by
 // sandbox name, refusing a sandbox whose identity is no longer expectedID.

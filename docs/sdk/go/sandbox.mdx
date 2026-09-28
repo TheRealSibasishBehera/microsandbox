@@ -2457,7 +2457,7 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 Modify(ctx, opts)
 ```
 
-Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot
+Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot. Returns `ErrSandboxReplaced` when the name now points to another sandbox
 
 <p className="msb-label">Returns</p>
 

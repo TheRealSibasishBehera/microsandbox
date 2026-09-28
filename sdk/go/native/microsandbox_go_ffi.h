@@ -151,6 +151,20 @@ char *msb_sandbox_handle_modify(uint64_t cancel_id,
                                 uintptr_t buf_len);
 
 /**
+ * Plan or apply a sandbox modification by name, bound to the handle's
+ * captured identity. `expected_id` is that identity; a sandbox that now holds
+ * the name under another identity is refused as replaced.
+ * Input: `{"patch":{...},"policy":"no_restart|next_start|restart","dry_run":bool}`
+ * Output: the serialized `SandboxModificationPlan`.
+ */
+char *msb_sandbox_handle_modify_identified(uint64_t cancel_id,
+                                           const char *name,
+                                           const char *expected_id,
+                                           const char *opts_json,
+                                           unsigned char *buf,
+                                           uintptr_t buf_len);
+
+/**
  * Keep waiting for a modification by name that did not settle within its
  * apply budget. `expected_id` is the handle's captured identity; a sandbox
  * that now holds the name under another identity is refused as replaced.

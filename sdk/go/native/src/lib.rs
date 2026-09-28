@@ -3267,6 +3267,33 @@ pub unsafe extern "C" fn msb_sandbox_handle_modify(
     })
 }
 
+/// Plan or apply a sandbox modification by name, bound to the handle's
+/// captured identity. `expected_id` is that identity; a sandbox that now holds
+/// the name under another identity is refused as replaced.
+/// Input: `{"patch":{...},"policy":"no_restart|next_start|restart","dry_run":bool}`
+/// Output: the serialized `SandboxModificationPlan`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_modify_identified(
+    cancel_id: u64,
+    name: *const c_char,
+    expected_id: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let expected_id = unsafe { cstr(expected_id) }?;
+        let opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
+        let policy = parse_modify_policy(opts.policy.as_deref())?;
+        Ok(Box::pin(async move {
+            let h = identified_sandbox_handle(&name, &expected_id).await?;
+            let builder = configure_modify(h.modify(), opts.patch, policy);
+            run_modify(builder, opts.dry_run).await
+        }))
+    })
+}
+
 /// Keep waiting for a modification by name that did not settle within its
 /// apply budget. `expected_id` is the handle's captured identity; a sandbox
 /// that now holds the name under another identity is refused as replaced.
@@ -3285,15 +3312,7 @@ pub unsafe extern "C" fn msb_sandbox_handle_resume_modification(
         let expected_id = unsafe { cstr(expected_id) }?;
         let operation_id = unsafe { cstr(operation_id) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
-            let actual = h.id().to_string();
-            if actual != expected_id {
-                return Err(FfiError::from(MicrosandboxError::SandboxReplaced {
-                    name,
-                    expected: expected_id,
-                    actual,
-                }));
-            }
+            let h = identified_sandbox_handle(&name, &expected_id).await?;
             modification_plan_json(h.resume_modification(operation_id).await)
         }))
     })

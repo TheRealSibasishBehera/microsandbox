@@ -208,13 +208,14 @@ func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModif
 }
 
 // Modify plans or applies a sandbox modification by name. It does not start
-// stopped sandboxes; next-start changes persist for the next boot.
+// stopped sandboxes; next-start changes persist for the next boot. It returns
+// ErrSandboxReplaced when the name now belongs to a different sandbox.
 func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error) {
 	payload, err := buildModifyRequestJSON(opts)
 	if err != nil {
 		return nil, err
 	}
-	out, err := ffi.ModifySandboxByName(ctx, h.name, payload)
+	out, err := ffi.ModifySandboxHandle(ctx, h.name, h.id, payload)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
