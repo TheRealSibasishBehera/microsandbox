@@ -62,3 +62,32 @@ pub(crate) fn local_backend_builder(
         .managed_config_path(home.join("managed.json"))
         .home(home)
 }
+
+/// Seed a running row whose live run is owned by this test process.
+#[cfg(feature = "local")]
+pub(crate) async fn seed_control_run(local: &crate::LocalBackend, name: &str) {
+    use crate::db::entity::{run, sandbox};
+    use sea_orm::{EntityTrait, Set};
+
+    let db = local.db().await.unwrap();
+    let sandbox_id = sandbox::Entity::insert(sandbox::ActiveModel {
+        name: Set(name.into()),
+        config: Set("{}".into()),
+        status: Set(crate::sandbox::SandboxStatus::Running),
+        ephemeral: Set(false),
+        ..Default::default()
+    })
+    .exec(db.write())
+    .await
+    .unwrap()
+    .last_insert_id;
+    run::Entity::insert(run::ActiveModel {
+        sandbox_id: Set(sandbox_id),
+        pid: Set(Some(std::process::id() as i32)),
+        status: Set(run::RunStatus::Running),
+        ..Default::default()
+    })
+    .exec(db.write())
+    .await
+    .unwrap();
+}

@@ -6,11 +6,13 @@
 //! methods; [`LocalBackend::create_sandbox`] is its entry point.
 
 mod create;
+pub(crate) mod modify;
 #[cfg(target_os = "linux")]
 mod process_exit;
 #[cfg(target_os = "macos")]
 #[path = "process_exit_macos.rs"]
 mod process_exit;
+mod restore;
 mod stop;
 
 use std::collections::{BTreeMap, HashMap, HashSet};

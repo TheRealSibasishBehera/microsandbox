@@ -25,7 +25,6 @@ mod handle;
 pub(crate) mod identity;
 pub mod init;
 pub(crate) mod metrics;
-#[cfg(feature = "local")]
 mod modify;
 #[cfg(feature = "local")]
 mod patch;
@@ -114,12 +113,6 @@ pub(crate) fn reserved_label_prefix(key: &str) -> Option<&'static str> {
 #[cfg(feature = "local")]
 pub(crate) use builder::{apply_checkpoint_restore_constraints, apply_snapshot_root_layout};
 #[cfg(feature = "local")]
-pub(crate) use modify::control_checkpoint_create;
-#[cfg(feature = "local")]
-pub(crate) use modify::control_disk_checkpoint_create;
-#[cfg(feature = "local")]
-pub(crate) use modify::restore_requested_resources;
-#[cfg(feature = "local")]
 pub(crate) use patch::{apply_patches, build_flat_tree, build_upper_tree};
 #[cfg(all(feature = "local", windows))]
 pub(crate) use reap::reap_leaked_runtime_process;
@@ -195,7 +188,6 @@ mod restore_warnings;
 mod stop;
 #[cfg(feature = "local")]
 pub(crate) use external_mounts::resolve_external_mounts;
-#[cfg(feature = "local")]
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
