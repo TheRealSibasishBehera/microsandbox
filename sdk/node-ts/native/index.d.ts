@@ -757,10 +757,10 @@ export declare class RestoreBuilder {
   maxDuration(secs: number): this
   /** Apply the destination host's idle timeout in seconds; zero expires immediately. */
   idleTimeout(secs: number): this
-  /** Explicitly reuse locally validated source resource bindings. */
-  dangerouslyInheritResources(): this
   /** Accept missing restore resources without inheriting host resources. */
   allowMissingResources(): this
+  /** Explicitly reuse locally validated source resource bindings. */
+  dangerouslyInheritResources(): this
   /** Supply the base for omitted disk layers and RAM objects in a snapshot archive. */
   snapshotBase(base: string): this
   /** Cold-boot only the disk state carried by a full snapshot. */
@@ -1069,6 +1069,11 @@ export declare class Sandbox {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
+  /**
+   * Keep waiting for a modification that did not settle within `modify()`'s
+   * budget. Returns the plan as a JSON string.
+   */
+  resumeModification(operationId: string): Promise<string>
   /** Compact root and owned-data disk prefixes; the limit includes the base, not the writable head. */
   compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
@@ -1470,6 +1475,11 @@ export declare class SandboxHandle {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
+  /**
+   * Keep waiting for a modification that did not settle within `modify()`'s
+   * budget. Returns the plan as a JSON string.
+   */
+  resumeModification(operationId: string): Promise<string>
   /** Compact root and owned-data disk prefixes of a running or stopped sandbox. */
   compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
   /** Start the sandbox (attached mode) — returns a live Sandbox handle. */
