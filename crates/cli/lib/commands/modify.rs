@@ -492,15 +492,40 @@ fn print_apply_success(plan: &SandboxModificationPlan) {
         ui::success("Modified", &plan.sandbox);
         ui::success("Restarted", &plan.sandbox);
     } else {
-        let target = if plan.policy == microsandbox::sandbox::ModificationPolicy::NextStart
-            && !matches!(plan.status.as_str(), "created" | "stopped" | "crashed")
-        {
-            format!("{} {}", plan.sandbox, style("(next start)").dim())
-        } else {
-            plan.sandbox.clone()
-        };
-
-        ui::success("Modified", &target);
+        match apply_outcome(plan) {
+            ApplyOutcome::Applied => ui::success("Modified", &plan.sandbox),
+            ApplyOutcome::NextStart => ui::success(
+                "Modified",
+                &format!("{} {}", plan.sandbox, style("(next start)").dim()),
+            ),
+            ApplyOutcome::PartlyNextStart(next_start) => {
+                ui::success("Modified", &plan.sandbox);
+                ui::notice("Next start", &next_start.join(", "));
+            }
+            ApplyOutcome::Unconfirmed {
+                unconfirmed,
+                next_start,
+            } => {
+                ui::success("Committed", &plan.sandbox);
+                let unconfirmed = format!(
+                    "not confirmed on the running sandbox: {}",
+                    unconfirmed.join(", ")
+                );
+                let next_start = (!next_start.is_empty())
+                    .then(|| format!("applies on next start: {}", next_start.join(", ")));
+                let mut lines = vec![ui::ErrorLine::Cause(&unconfirmed)];
+                if let Some(next_start) = &next_start {
+                    lines.push(ui::ErrorLine::Cause(next_start));
+                }
+                lines.push(ui::ErrorLine::Hint(
+                    "the change is saved and applies from the next start at the latest",
+                ));
+                ui::warn_with_lines(
+                    &format!("could not confirm \"{}\" is using the change", plan.sandbox),
+                    &lines,
+                );
+            }
+        }
     }
 
     if should_render_resize_status(&plan.resize_status) {
@@ -555,6 +580,39 @@ fn convergence_cell(state: ResourceConvergenceState) -> String {
             style(label).red().bold().to_string()
         }
         ResourceConvergenceState::Accepted | ResourceConvergenceState::Applied => label.to_string(),
+    }
+}
+
+fn apply_outcome(plan: &SandboxModificationPlan) -> ApplyOutcome {
+    let mut unconfirmed = Vec::new();
+    let mut next_start = Vec::new();
+    for change in &plan.changes {
+        let (disposition, label) = match change {
+            PlannedChange::Config(change) => {
+                (change.disposition, display_field(&change.field).to_string())
+            }
+            PlannedChange::Secret(change) => {
+                (change.disposition, format!("secret {}", change.name))
+            }
+        };
+        match disposition {
+            ModificationDisposition::Unconfirmed => unconfirmed.push(label),
+            ModificationDisposition::NextStart => next_start.push(label),
+            _ => {}
+        }
+    }
+
+    if !unconfirmed.is_empty() {
+        ApplyOutcome::Unconfirmed {
+            unconfirmed,
+            next_start,
+        }
+    } else if next_start.is_empty() {
+        ApplyOutcome::Applied
+    } else if next_start.len() == plan.changes.len() {
+        ApplyOutcome::NextStart
+    } else {
+        ApplyOutcome::PartlyNextStart(next_start)
     }
 }
 
@@ -705,6 +763,22 @@ fn replayed_args(args: &ModifyArgs) -> String {
     } else {
         format!("{} ", rendered.join(" "))
     }
+}
+
+/// Where the changes of an applied plan took effect, for human output.
+#[derive(Debug, PartialEq, Eq)]
+enum ApplyOutcome {
+    /// Every change took effect now.
+    Applied,
+    /// Every change applies on the next start.
+    NextStart,
+    /// The listed changes apply on the next start; the rest took effect now.
+    PartlyNextStart(Vec<String>),
+    /// Some changes are saved but not confirmed by the running sandbox.
+    Unconfirmed {
+        unconfirmed: Vec<String>,
+        next_start: Vec<String>,
+    },
 }
 
 struct ApplyBlocker {
@@ -938,6 +1012,78 @@ mod tests {
         assert_eq!(
             convergence_label(ResourceConvergenceState::Failed),
             "failed"
+        );
+    }
+
+    fn applied_plan(changes: Vec<PlannedChange>) -> SandboxModificationPlan {
+        SandboxModificationPlan {
+            sandbox: "api".to_string(),
+            status: "running".to_string(),
+            applied: true,
+            policy: microsandbox::sandbox::ModificationPolicy::NoRestart,
+            changes,
+            conflicts: Vec::new(),
+            warnings: Vec::new(),
+            resize_status: Vec::new(),
+        }
+    }
+
+    fn config_change(field: &str, disposition: ModificationDisposition) -> PlannedChange {
+        PlannedChange::Config(ConfigPlannedChange {
+            field: field.to_string(),
+            change: ChangeKind::Updated,
+            before: None,
+            after: None,
+            disposition,
+            reason: None,
+        })
+    }
+
+    fn secret_change(name: &str, disposition: ModificationDisposition) -> PlannedChange {
+        PlannedChange::Secret(SecretPlannedChange {
+            field: "secret".to_string(),
+            name: name.to_string(),
+            change: SecretChangeKind::Rotated,
+            before_ref: None,
+            after_ref: None,
+            disposition,
+            allow_hosts: Vec::new(),
+            reason: None,
+        })
+    }
+
+    #[test]
+    fn apply_outcome_reports_changes_that_did_not_take_effect_now() {
+        use ModificationDisposition::{Live, NextStart, Unconfirmed};
+
+        assert_eq!(
+            apply_outcome(&applied_plan(vec![config_change("cpus", Live)])),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            apply_outcome(&applied_plan(vec![
+                config_change("max_cpus", NextStart),
+                secret_change("API_KEY", NextStart),
+            ])),
+            ApplyOutcome::NextStart
+        );
+        assert_eq!(
+            apply_outcome(&applied_plan(vec![
+                config_change("cpus", Live),
+                config_change("max_cpus", NextStart),
+            ])),
+            ApplyOutcome::PartlyNextStart(vec!["max CPUs".to_string()])
+        );
+        assert_eq!(
+            apply_outcome(&applied_plan(vec![
+                config_change("cpus", Live),
+                config_change("max_cpus", NextStart),
+                secret_change("API_KEY", Unconfirmed),
+            ])),
+            ApplyOutcome::Unconfirmed {
+                unconfirmed: vec!["secret API_KEY".to_string()],
+                next_start: vec!["max CPUs".to_string()],
+            }
         );
     }
 
