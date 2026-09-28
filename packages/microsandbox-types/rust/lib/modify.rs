@@ -81,6 +81,7 @@ pub struct SandboxModificationPatch {
 /// Policy selected for applying or planning a modification.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ModificationPolicy {
     /// Apply only changes that can complete without restarting the running sandbox.
@@ -179,6 +180,7 @@ impl SecretSource {
 /// Serializable dry-run or apply plan for a sandbox modification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SandboxModificationPlan {
     /// Sandbox being modified.
     pub sandbox: String,
@@ -209,6 +211,7 @@ pub struct SandboxModificationPlan {
 /// One planned modification entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlannedChange {
     /// Ordinary config change.
@@ -221,6 +224,7 @@ pub enum PlannedChange {
 /// Planned config change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ConfigPlannedChange {
     /// Config field being changed.
     pub field: String,
@@ -247,6 +251,7 @@ pub struct ConfigPlannedChange {
 /// Planned secret change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SecretPlannedChange {
     /// Table field name. This is always `secret`.
     pub field: String,
@@ -280,6 +285,7 @@ pub struct SecretPlannedChange {
 /// Natural config change type for human output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ChangeKind {
     /// A field is being added.
@@ -295,6 +301,7 @@ pub enum ChangeKind {
 /// Natural secret change type for human output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum SecretChangeKind {
     /// A secret placeholder is being added.
     #[serde(rename = "added")]
@@ -327,6 +334,7 @@ pub enum SecretChangeKind {
 /// so matches outside this crate need a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[non_exhaustive]
 pub enum ModificationDisposition {
     /// Applies to the running VM now.
@@ -355,6 +363,7 @@ pub enum ModificationDisposition {
 /// Conflict that blocks applying a modification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ModificationConflict {
     /// Field with the conflict.
     pub field: String,
@@ -366,6 +375,7 @@ pub struct ModificationConflict {
 /// Warning emitted while planning a modification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ModificationWarning {
     /// Field associated with the warning.
     pub field: String,
@@ -377,6 +387,7 @@ pub struct ModificationWarning {
 /// Resource kind used by live resize convergence reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
     /// vCPU count.
@@ -389,6 +400,7 @@ pub enum ResourceKind {
 /// Runtime convergence state for an accepted resource resize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceConvergenceState {
     /// The runtime accepted the request.
@@ -410,6 +422,7 @@ pub enum ResourceConvergenceState {
 /// Status for a live resource resize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ResourceResizeStatus {
     /// Resource being resized.
     pub resource: ResourceKind,
