@@ -8017,6 +8017,30 @@ mod tests {
     }
 
     #[test]
+    fn modification_plan_json_keeps_unknown_dispositions() {
+        let plan = serde_json::from_value(serde_json::json!({
+            "sandbox": "api",
+            "status": "running",
+            "applied": true,
+            "policy": "no_restart",
+            "changes": [{
+                "kind": "secret",
+                "field": "secret",
+                "name": "API_KEY",
+                "change": "rotated",
+                "disposition": "after migration",
+            }],
+            "conflicts": [],
+            "warnings": [],
+        }))
+        .unwrap();
+        let out =
+            modification_plan_json(Ok(plan)).unwrap_or_else(|error| panic!("{}", error.message));
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["changes"][0]["disposition"], "after migration");
+    }
+
+    #[test]
     fn modification_incomplete_error_preserves_ffi_payload() {
         for committed in [Some(true), Some(false), None] {
             let error = MicrosandboxError::ModificationIncomplete {

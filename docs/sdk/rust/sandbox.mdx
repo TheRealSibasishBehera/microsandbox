@@ -3154,7 +3154,7 @@ Secret change in a modification plan. Values are omitted by construction; `befor
 
 <p className="msb-backref">Used by <a href="#configplannedchange">ConfigPlannedChange.disposition</a> · <a href="#secretplannedchange">SecretPlannedChange.disposition</a></p>
 
-When or whether a planned change can take effect. Serializes as the quoted strings below. The enum is `#[non_exhaustive]`: backends may report dispositions added later, so matches need a wildcard arm.
+When or whether a planned change can take effect. Serializes as the quoted strings below; `as_str()` returns the same string. The enum is `#[non_exhaustive]`: backends may report dispositions added later, so matches need a wildcard arm.
 
 | Value | Description |
 |-------|-------------|
@@ -3163,6 +3163,7 @@ When or whether a planned change can take effect. Serializes as the quoted strin
 | `RequiresRestart` (`"requires restart"`) | Needs a restart before it can take effect; `apply()` refuses it unless the [`restart()`](#modification-restart) policy is selected |
 | `Unsupported` (`"unsupported"`) | Cannot be changed by `modify` |
 | `Unconfirmed` (`"unconfirmed"`) | Applied plans only: the change was saved, but the running sandbox did not confirm it. The local backend does not report it |
+| `Unknown(String)` | A disposition added by a newer backend, kept as its raw string and serialized back unchanged. Treat it as unknown |
 
 ### ResourceResizeStatus
 

@@ -333,18 +333,14 @@ fn print_human_plan(plan: &SandboxModificationPlan) {
             PlannedChange::Config(change) => {
                 let mut row = config_row(change);
                 if include_effect {
-                    row.push(ui::format_disposition(disposition_label(
-                        change.disposition,
-                    )));
+                    row.push(ui::format_disposition(change.disposition.as_str()));
                 }
                 table.add_row(row);
             }
             PlannedChange::Secret(change) => {
                 let mut row = secret_row(change);
                 if include_effect {
-                    row.push(ui::format_disposition(disposition_label(
-                        change.disposition,
-                    )));
+                    row.push(ui::format_disposition(change.disposition.as_str()));
                 }
                 table.add_row(row);
             }
@@ -588,11 +584,12 @@ fn apply_outcome(plan: &SandboxModificationPlan) -> ApplyOutcome {
     let mut next_start = Vec::new();
     for change in &plan.changes {
         let (disposition, label) = match change {
-            PlannedChange::Config(change) => {
-                (change.disposition, display_field(&change.field).to_string())
-            }
+            PlannedChange::Config(change) => (
+                &change.disposition,
+                display_field(&change.field).to_string(),
+            ),
             PlannedChange::Secret(change) => {
-                (change.disposition, format!("secret {}", change.name))
+                (&change.disposition, format!("secret {}", change.name))
             }
         };
         match disposition {
@@ -688,17 +685,6 @@ fn secret_change_label(change: SecretChangeKind) -> &'static str {
         SecretChangeKind::Renamed => "renamed",
         SecretChangeKind::HostsUpdated => "hosts updated",
         SecretChangeKind::PlaceholderUpdated => "placeholder updated",
-    }
-}
-
-fn disposition_label(disposition: ModificationDisposition) -> &'static str {
-    match disposition {
-        ModificationDisposition::Live => "live",
-        ModificationDisposition::NextStart => "next start",
-        ModificationDisposition::RequiresRestart => "requires restart",
-        ModificationDisposition::Unsupported => "unsupported",
-        ModificationDisposition::Unconfirmed => "unconfirmed",
-        _ => "unknown",
     }
 }
 
@@ -1084,6 +1070,16 @@ mod tests {
                 unconfirmed: vec!["secret API_KEY".to_string()],
                 next_start: vec!["max CPUs".to_string()],
             }
+        );
+    }
+
+    #[test]
+    fn unknown_disposition_prints_its_raw_string() {
+        let disposition: ModificationDisposition =
+            serde_json::from_str("\"After Migration\"").unwrap();
+        assert_eq!(
+            ui::format_disposition(disposition.as_str()),
+            "After Migration"
         );
     }
 

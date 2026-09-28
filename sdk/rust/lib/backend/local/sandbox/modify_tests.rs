@@ -1650,7 +1650,7 @@ fn secret_plan_dispositions(plan: &SandboxModificationPlan) -> Vec<ModificationD
     plan.changes
         .iter()
         .map(|change| match change {
-            PlannedChange::Secret(change) => change.disposition,
+            PlannedChange::Secret(change) => change.disposition.clone(),
             PlannedChange::Config(_) => panic!("expected secret change"),
         })
         .collect()
@@ -2166,7 +2166,7 @@ fn live_secret_change_on_tls_disabled_config_requires_restart() {
         .changes
         .iter()
         .filter_map(|change| match change {
-            PlannedChange::Secret(change) => Some(change.disposition),
+            PlannedChange::Secret(change) => Some(change.disposition.clone()),
             PlannedChange::Config(_) => None,
         })
         .collect();

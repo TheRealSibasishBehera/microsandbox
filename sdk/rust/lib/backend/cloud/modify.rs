@@ -311,7 +311,9 @@ mod tests {
 
     use super::*;
     use crate::backend::{Backend, SandboxBackend};
-    use crate::sandbox::{SecretModificationPatch, SecretSource};
+    use crate::sandbox::{
+        ModificationDisposition, PlannedChange, SecretModificationPatch, SecretSource,
+    };
 
     const SANDBOX_ID: &str = "6f1c1f7e-3b8a-4c2e-9d55-0a1b2c3d4e5f";
 
@@ -870,6 +872,46 @@ mod tests {
             let lines: Vec<_> = mock.requests().into_iter().map(|r| r.line).collect();
             assert_eq!(lines, [apply_line(), poll_line(), poll_line()]);
         }
+    }
+
+    #[tokio::test]
+    async fn unknown_dispositions_from_a_newer_server_are_kept() {
+        const NEWER: &str = "after migration";
+        let expect_kept = |plan: SandboxModificationPlan| {
+            let PlannedChange::Secret(change) = &plan.changes[0] else {
+                panic!("expected a secret change: {:?}", plan.changes[0]);
+            };
+            assert_eq!(
+                change.disposition,
+                ModificationDisposition::Unknown(NEWER.into())
+            );
+            assert_eq!(serde_json::to_value(&plan).unwrap(), plan_json(NEWER));
+        };
+
+        let mock = MockCloud::start(vec![Reply::Json(200, plan_json(NEWER))]).await;
+        expect_kept(
+            plan(&mock.backend(), cloud(), secret_patch(value_secret("v")))
+                .await
+                .unwrap(),
+        );
+
+        let mock = MockCloud::start(vec![Reply::Json(200, plan_json(NEWER))]).await;
+        expect_kept(
+            apply(&mock.backend(), cloud(), secret_patch(value_secret("v")))
+                .await
+                .unwrap(),
+        );
+
+        let mock = MockCloud::start(vec![
+            Reply::Json(202, operation_json("in_progress")),
+            Reply::Json(200, succeeded_json(NEWER)),
+        ])
+        .await;
+        expect_kept(
+            apply(&mock.backend(), cloud(), secret_patch(value_secret("v")))
+                .await
+                .unwrap(),
+        );
     }
 
     #[tokio::test]

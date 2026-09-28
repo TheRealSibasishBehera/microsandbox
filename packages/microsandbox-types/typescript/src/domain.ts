@@ -318,7 +318,8 @@ export type ModificationDisposition =
   | "next start"
   | "requires restart"
   | "unsupported"
-  | "unconfirmed";
+  | "unconfirmed"
+  | string & {};
 
 export type ModificationConflict = {
   /**

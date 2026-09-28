@@ -1426,7 +1426,7 @@ fn push_secret_changes(
             status,
             change,
             placeholder_changed,
-            disposition,
+            &disposition,
             live_secret_reconfigure_supported,
             warnings,
         );
@@ -1481,7 +1481,7 @@ fn push_secret_changes(
             status,
             change,
             false,
-            disposition,
+            &disposition,
             live_secret_reconfigure_supported,
             warnings,
         );
@@ -1565,7 +1565,7 @@ fn push_live_secret_warning(
     status: SandboxStatus,
     change: SecretChangeKind,
     placeholder_changed: bool,
-    disposition: ModificationDisposition,
+    disposition: &ModificationDisposition,
     live_secret_reconfigure_supported: bool,
     warnings: &mut Vec<ModificationWarning>,
 ) {

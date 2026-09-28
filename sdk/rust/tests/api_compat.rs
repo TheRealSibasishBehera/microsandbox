@@ -95,7 +95,7 @@ fn modification_disposition_is_non_exhaustive_downstream() {
 
     // Downstream crates cannot match exhaustively: the wildcard arm is
     // required and is what keeps them compiling when a disposition is added.
-    fn label(disposition: ModificationDisposition) -> &'static str {
+    fn label(disposition: &ModificationDisposition) -> &'static str {
         match disposition {
             ModificationDisposition::Live => "live",
             ModificationDisposition::NextStart => "next start",
@@ -107,15 +107,19 @@ fn modification_disposition_is_non_exhaustive_downstream() {
     }
 
     let unconfirmed = ModificationDisposition::Unconfirmed;
-    assert_eq!(label(unconfirmed), "unconfirmed");
+    assert_eq!(label(&unconfirmed), "unconfirmed");
     assert_eq!(
-        serde_json::to_value(unconfirmed).unwrap(),
+        serde_json::to_value(&unconfirmed).unwrap(),
         serde_json::json!("unconfirmed")
     );
     assert_eq!(
         serde_json::from_str::<ModificationDisposition>("\"unconfirmed\"").unwrap(),
         unconfirmed
     );
+
+    let newer = serde_json::from_str::<ModificationDisposition>("\"after migration\"").unwrap();
+    assert_eq!(label(&newer), "unknown");
+    assert_eq!(newer.as_str(), "after migration");
 }
 
 #[allow(dead_code)]
