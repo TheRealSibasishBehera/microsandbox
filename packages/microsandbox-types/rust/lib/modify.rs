@@ -322,8 +322,12 @@ pub enum SecretChangeKind {
 }
 
 /// When or whether a planned change can take effect.
+///
+/// Non-exhaustive: backends may report dispositions added after this release,
+/// so matches outside this crate need a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[non_exhaustive]
 pub enum ModificationDisposition {
     /// Applies to the running VM now.
     #[serde(rename = "live")]
@@ -340,6 +344,12 @@ pub enum ModificationDisposition {
     /// Cannot be changed by `modify`.
     #[serde(rename = "unsupported")]
     Unsupported,
+
+    /// Applied: the durable mutation committed, but convergence on the current
+    /// runtime could not be proved. Dry runs never report it, and the local
+    /// backend need not.
+    #[serde(rename = "unconfirmed")]
+    Unconfirmed,
 }
 
 /// Conflict that blocks applying a modification.
@@ -430,5 +440,34 @@ impl std::fmt::Debug for SecretModificationPatch {
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
             .finish()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_disposition_has_a_distinct_wire_value() {
+        for (disposition, wire) in [
+            (ModificationDisposition::Live, "live"),
+            (ModificationDisposition::NextStart, "next start"),
+            (ModificationDisposition::RequiresRestart, "requires restart"),
+            (ModificationDisposition::Unsupported, "unsupported"),
+            (ModificationDisposition::Unconfirmed, "unconfirmed"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(disposition).unwrap(),
+                serde_json::json!(wire)
+            );
+            assert_eq!(
+                serde_json::from_value::<ModificationDisposition>(serde_json::json!(wire)).unwrap(),
+                disposition
+            );
+        }
     }
 }

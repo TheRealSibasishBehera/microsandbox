@@ -85,6 +85,35 @@ fn rust_modify_surface_is_backend_neutral() {
     let _ = microsandbox::ModificationPolicy::NoRestart;
 }
 
+#[test]
+fn modification_disposition_is_non_exhaustive_downstream() {
+    use microsandbox::ModificationDisposition;
+
+    // Downstream crates cannot match exhaustively: the wildcard arm is
+    // required and is what keeps them compiling when a disposition is added.
+    fn label(disposition: ModificationDisposition) -> &'static str {
+        match disposition {
+            ModificationDisposition::Live => "live",
+            ModificationDisposition::NextStart => "next start",
+            ModificationDisposition::RequiresRestart => "requires restart",
+            ModificationDisposition::Unsupported => "unsupported",
+            ModificationDisposition::Unconfirmed => "unconfirmed",
+            _ => "unknown",
+        }
+    }
+
+    let unconfirmed = ModificationDisposition::Unconfirmed;
+    assert_eq!(label(unconfirmed), "unconfirmed");
+    assert_eq!(
+        serde_json::to_value(unconfirmed).unwrap(),
+        serde_json::json!("unconfirmed")
+    );
+    assert_eq!(
+        serde_json::from_str::<ModificationDisposition>("\"unconfirmed\"").unwrap(),
+        unconfirmed
+    );
+}
+
 #[allow(dead_code)]
 async fn rust_sandbox_fs_handle_api_stays_available(
     fs: &microsandbox::sandbox::SandboxFsOps<'_>,

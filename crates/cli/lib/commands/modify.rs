@@ -639,6 +639,8 @@ fn disposition_label(disposition: ModificationDisposition) -> &'static str {
         ModificationDisposition::NextStart => "next start",
         ModificationDisposition::RequiresRestart => "requires restart",
         ModificationDisposition::Unsupported => "unsupported",
+        ModificationDisposition::Unconfirmed => "unconfirmed",
+        _ => "unknown",
     }
 }
 
