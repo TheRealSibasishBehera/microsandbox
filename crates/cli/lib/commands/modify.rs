@@ -500,22 +500,39 @@ fn print_apply_success(plan: &SandboxModificationPlan) {
             }
             ApplyOutcome::Unconfirmed {
                 unconfirmed,
+                unrecognized,
                 next_start,
             } => {
                 ui::success("Committed", &plan.sandbox);
-                let unconfirmed = format!(
-                    "not confirmed on the running sandbox: {}",
-                    unconfirmed.join(", ")
-                );
+                let unconfirmed = (!unconfirmed.is_empty()).then(|| {
+                    format!(
+                        "not confirmed on the running sandbox: {}",
+                        unconfirmed.join(", ")
+                    )
+                });
+                let unrecognized = (!unrecognized.is_empty()).then(|| {
+                    format!(
+                        "reported with a status this msb does not recognize: {}",
+                        unrecognized.join(", ")
+                    )
+                });
                 let next_start = (!next_start.is_empty())
                     .then(|| format!("applies on next start: {}", next_start.join(", ")));
-                let mut lines = vec![ui::ErrorLine::Cause(&unconfirmed)];
-                if let Some(next_start) = &next_start {
-                    lines.push(ui::ErrorLine::Cause(next_start));
+                let mut lines: Vec<ui::ErrorLine> = [&unconfirmed, &unrecognized, &next_start]
+                    .into_iter()
+                    .flatten()
+                    .map(|line| ui::ErrorLine::Cause(line))
+                    .collect();
+                if unconfirmed.is_some() {
+                    lines.push(ui::ErrorLine::Hint(
+                        "the change is saved and applies from the next start at the latest",
+                    ));
                 }
-                lines.push(ui::ErrorLine::Hint(
-                    "the change is saved and applies from the next start at the latest",
-                ));
+                if unrecognized.is_some() {
+                    lines.push(ui::ErrorLine::Hint(
+                        "update msb to see what the status means",
+                    ));
+                }
                 ui::warn_with_lines(
                     &format!("could not confirm \"{}\" is using the change", plan.sandbox),
                     &lines,
@@ -581,6 +598,7 @@ fn convergence_cell(state: ResourceConvergenceState) -> String {
 
 fn apply_outcome(plan: &SandboxModificationPlan) -> ApplyOutcome {
     let mut unconfirmed = Vec::new();
+    let mut unrecognized = Vec::new();
     let mut next_start = Vec::new();
     for change in &plan.changes {
         let (disposition, label) = match change {
@@ -595,13 +613,18 @@ fn apply_outcome(plan: &SandboxModificationPlan) -> ApplyOutcome {
         match disposition {
             ModificationDisposition::Unconfirmed => unconfirmed.push(label),
             ModificationDisposition::NextStart => next_start.push(label),
+            // A status from a newer backend is never reported as in effect.
+            ModificationDisposition::Unknown(status) => {
+                unrecognized.push(format!("{label} ({status})"))
+            }
             _ => {}
         }
     }
 
-    if !unconfirmed.is_empty() {
+    if !unconfirmed.is_empty() || !unrecognized.is_empty() {
         ApplyOutcome::Unconfirmed {
             unconfirmed,
+            unrecognized,
             next_start,
         }
     } else if next_start.is_empty() {
@@ -760,9 +783,11 @@ enum ApplyOutcome {
     NextStart,
     /// The listed changes apply on the next start; the rest took effect now.
     PartlyNextStart(Vec<String>),
-    /// Some changes are saved but not confirmed by the running sandbox.
+    /// Some changes are saved but not confirmed by the running sandbox, or
+    /// carry a status this CLI does not recognize.
     Unconfirmed {
         unconfirmed: Vec<String>,
+        unrecognized: Vec<String>,
         next_start: Vec<String>,
     },
 }
@@ -1068,7 +1093,24 @@ mod tests {
             ])),
             ApplyOutcome::Unconfirmed {
                 unconfirmed: vec!["secret API_KEY".to_string()],
+                unrecognized: Vec::new(),
                 next_start: vec!["max CPUs".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_status_is_never_reported_as_applied() {
+        let after_migration = ModificationDisposition::Unknown("after migration".to_string());
+        assert_eq!(
+            apply_outcome(&applied_plan(vec![secret_change(
+                "API_KEY",
+                after_migration
+            )])),
+            ApplyOutcome::Unconfirmed {
+                unconfirmed: Vec::new(),
+                unrecognized: vec!["secret API_KEY (after migration)".to_string()],
+                next_start: Vec::new(),
             }
         );
     }
