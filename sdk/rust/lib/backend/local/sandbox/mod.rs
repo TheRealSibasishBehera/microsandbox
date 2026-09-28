@@ -47,9 +47,9 @@ use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::runtime::SpawnMode;
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
-    RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage,
-    SandboxStatus, load_sandbox_record, validate_env, validate_hostname, validate_labels,
-    validate_volume_mounts,
+    ModificationPolicy, RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder,
+    SandboxModificationPatch, SandboxModificationPlan, SandboxPage, SandboxStatus,
+    load_sandbox_record, validate_env, validate_hostname, validate_labels, validate_volume_mounts,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -467,6 +467,19 @@ impl LocalBackend {
         let (model, pid) = self.sandbox_handle_state(name, expected_id).await?;
         let handle = SandboxHandle::from_local_model(backend, model, pid);
         handle.remove().await
+    }
+
+    /// Load a handle for `name`, refusing a row that replaced `expected_id`
+    /// before any reconciliation touches it.
+    async fn sandbox_handle(
+        &self,
+        backend: Arc<dyn Backend>,
+        name: &str,
+        expected_id: Option<i32>,
+    ) -> MicrosandboxResult<SandboxHandle> {
+        let (mut model, pid) = self.sandbox_handle_state(name, expected_id).await?;
+        model.status = crate::sandbox::pause::projected_status(self, name, model.status).await;
+        Ok(SandboxHandle::from_local_model(backend, model, pid))
     }
 
     /// Load the local DB row + active PID for a sandbox handle.
@@ -1270,11 +1283,7 @@ impl SandboxBackend for LocalBackend {
         backend: Arc<dyn Backend>,
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<SandboxHandle>> {
-        Box::pin(async move {
-            let (mut model, pid) = self.sandbox_handle_state(name, None).await?;
-            model.status = crate::sandbox::pause::projected_status(self, name, model.status).await;
-            Ok(SandboxHandle::from_local_model(backend, model, pid))
-        })
+        Box::pin(async move { self.sandbox_handle(backend, name, None).await })
     }
 
     fn list<'a>(
@@ -1384,6 +1393,34 @@ impl SandboxBackend for LocalBackend {
         Box::pin(async move {
             self.drain_sandbox(name, Some(local_identity(identity)?))
                 .await
+        })
+    }
+
+    fn plan_modification_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+        patch: SandboxModificationPatch,
+        policy: ModificationPolicy,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxModificationPlan>> {
+        Box::pin(async move {
+            let expected_id = local_identity(identity)?;
+            modify::dry_run(backend, name.to_owned(), expected_id, patch, policy).await
+        })
+    }
+
+    fn apply_modification_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+        patch: SandboxModificationPatch,
+        policy: ModificationPolicy,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxModificationPlan>> {
+        Box::pin(async move {
+            let expected_id = local_identity(identity)?;
+            modify::apply(backend, name.to_owned(), expected_id, patch, policy).await
         })
     }
 

@@ -963,6 +963,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cloud_modification_uses_typed_default_until_the_adapter_lands() {
+        let backend =
+            Arc::new(crate::test_support::cloud_backend("http://127.0.0.1:1", "test-key").unwrap());
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
+
+        crate::test_support::assert_modification_unsupported(
+            backend.as_ref(),
+            backend_dyn,
+            crate::backend::SandboxIdentity::Cloud("sandbox-id".into()),
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn cloud_follow_logs_rejects_bounded_filters_before_opening_stream() {
         let backend =
             Arc::new(crate::test_support::cloud_backend("http://127.0.0.1:1", "test-key").unwrap());

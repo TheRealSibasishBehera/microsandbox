@@ -33,7 +33,6 @@ pub(crate) use control::request::control_request_for_run;
 #[cfg(target_os = "linux")]
 pub(crate) use control::request::control_request_for_run_with_memory;
 pub(crate) use control::request::{control_disk_compact, control_session_for_run};
-pub(crate) use sandbox::modify;
 
 use std::{
     collections::{HashMap, HashSet},

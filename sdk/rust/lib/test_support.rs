@@ -91,3 +91,49 @@ pub(crate) async fn seed_control_run(local: &crate::LocalBackend, name: &str) {
     .await
     .unwrap();
 }
+
+/// Drive plan, apply, and resume through `sandboxes` and assert each returns
+/// the typed default `SandboxModify` refusal.
+pub(crate) async fn assert_modification_unsupported(
+    sandboxes: &dyn crate::backend::SandboxBackend,
+    backend: std::sync::Arc<dyn crate::Backend>,
+    identity: crate::backend::SandboxIdentity,
+) {
+    use crate::sandbox::{ModificationPolicy, SandboxModificationPatch};
+
+    let results = [
+        sandboxes
+            .plan_modification_identified(
+                backend.clone(),
+                "modify-default",
+                identity.clone(),
+                SandboxModificationPatch::default(),
+                ModificationPolicy::NoRestart,
+            )
+            .await,
+        sandboxes
+            .apply_modification_identified(
+                backend.clone(),
+                "modify-default",
+                identity.clone(),
+                SandboxModificationPatch::default(),
+                ModificationPolicy::Restart,
+            )
+            .await,
+        sandboxes
+            .resume_modification_identified(backend, "modify-default", identity, "op-1".into())
+            .await,
+    ];
+    for result in results {
+        assert!(
+            matches!(
+                result,
+                Err(crate::MicrosandboxError::Unsupported {
+                    op: crate::Operation::SandboxModify,
+                    reason: crate::UnsupportedReason::NotAvailable(_),
+                })
+            ),
+            "expected typed modify refusal, got {result:?}"
+        );
+    }
+}

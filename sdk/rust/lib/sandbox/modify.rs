@@ -5,9 +5,7 @@ use std::sync::Arc;
 use microsandbox_types::{EnvVar, SecretSubstitution, SecretViolationAction};
 
 use crate::MicrosandboxResult;
-use crate::backend::Backend;
-#[cfg(not(feature = "local"))]
-use crate::error::{Operation, UnsupportedReason};
+use crate::backend::{Backend, SandboxIdentity};
 use crate::size::Mebibytes;
 
 pub use microsandbox_types::modify::{
@@ -30,6 +28,7 @@ pub use microsandbox_types::modify::{
 pub struct SandboxModificationBuilder {
     backend: Arc<dyn Backend>,
     name: String,
+    identity: SandboxIdentity,
     patch: SandboxModificationPatch,
     policy: ModificationPolicy,
 }
@@ -52,11 +51,15 @@ pub struct SecretPatchBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxModificationBuilder {
-    #[cfg(feature = "local")]
-    pub(crate) fn new(backend: Arc<dyn Backend>, name: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        backend: Arc<dyn Backend>,
+        name: impl Into<String>,
+        identity: SandboxIdentity,
+    ) -> Self {
         Self {
             backend,
             name: name.into(),
+            identity,
             patch: SandboxModificationPatch::default(),
             policy: ModificationPolicy::NoRestart,
         }
@@ -182,19 +185,16 @@ impl SandboxModificationBuilder {
 
     /// Compute a modification plan without applying anything.
     pub async fn dry_run(self) -> MicrosandboxResult<SandboxModificationPlan> {
-        #[cfg(feature = "local")]
-        {
-            crate::backend::local::modify::dry_run(self.backend, self.name, self.patch, self.policy)
-                .await
-        }
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = (&self.backend, &self.name);
-            Err(crate::MicrosandboxError::unsupported(
-                Operation::SandboxModify,
-                UnsupportedReason::LocalOnly,
-            ))
-        }
+        self.backend
+            .sandboxes()
+            .plan_modification_identified(
+                self.backend.clone(),
+                &self.name,
+                self.identity,
+                self.patch,
+                self.policy,
+            )
+            .await
     }
 
     /// Apply supported changes, preserving any earlier live effects on failure.
@@ -216,19 +216,16 @@ impl SandboxModificationBuilder {
     /// `restart` or `next_start` on a running sandbox. Existing secrets that
     /// opt out of TLS identity continue to support live plain-HTTP updates.
     pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
-        #[cfg(feature = "local")]
-        {
-            crate::backend::local::modify::apply(self.backend, self.name, self.patch, self.policy)
-                .await
-        }
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = (&self.backend, &self.name);
-            Err(crate::MicrosandboxError::unsupported(
-                Operation::SandboxModify,
-                UnsupportedReason::LocalOnly,
-            ))
-        }
+        self.backend
+            .sandboxes()
+            .apply_modification_identified(
+                self.backend.clone(),
+                &self.name,
+                self.identity,
+                self.patch,
+                self.policy,
+            )
+            .await
     }
 }
 
@@ -337,11 +334,12 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let plain = SandboxModificationBuilder::new(backend.clone(), "size-api")
-            .memory(1024)
-            .max_memory(8192)
-            .root_disk_size(4096);
-        let typed = SandboxModificationBuilder::new(backend, "size-api")
+        let plain =
+            SandboxModificationBuilder::new(backend.clone(), "size-api", SandboxIdentity::Local(1))
+                .memory(1024)
+                .max_memory(8192)
+                .root_disk_size(4096);
+        let typed = SandboxModificationBuilder::new(backend, "size-api", SandboxIdentity::Local(1))
             .memory(1.gib())
             .max_memory(8.gib())
             .root_disk_size(4.gib());

@@ -113,6 +113,335 @@ async fn persist_config_replaces_label_projection() {
     assert!(stored.spec.labels.is_empty());
 }
 
+async fn identity_test_backend(home: &std::path::Path) -> Arc<dyn Backend> {
+    Arc::new(
+        crate::test_support::local_backend_builder(home)
+            .build()
+            .await
+            .unwrap(),
+    )
+}
+
+/// Insert a stopped row for `config` with its label projection.
+async fn insert_stopped_row(backend: &Arc<dyn Backend>, config: &SandboxConfig) -> i32 {
+    let pools = backend.as_local().unwrap().db().await.unwrap();
+    let id = sandbox_entity::ActiveModel {
+        name: Set(config.spec.name.clone()),
+        config: Set(serde_json::to_string(config).unwrap()),
+        active_config: Set(None),
+        status: Set(SandboxStatus::Stopped),
+        ephemeral: Set(false),
+        created_at: Set(None),
+        updated_at: Set(None),
+        ..Default::default()
+    }
+    .insert(pools.write())
+    .await
+    .unwrap()
+    .id;
+    for (key, value) in &config.spec.labels {
+        sandbox_label_entity::ActiveModel {
+            sandbox_id: Set(id),
+            key: Set(key.clone()),
+            value: Set(value.clone()),
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+    }
+    id
+}
+
+/// Remove the row `id` and create a replacement under the same name.
+async fn recreate_row(backend: &Arc<dyn Backend>, id: i32, config: &SandboxConfig) -> i32 {
+    let pools = backend.as_local().unwrap().db().await.unwrap();
+    sandbox_entity::Entity::delete_by_id(id)
+        .exec(pools.write())
+        .await
+        .unwrap();
+    let replacement = insert_stopped_row(backend, config).await;
+    assert_ne!(replacement, id);
+    replacement
+}
+
+/// Stored config JSON, update time, and sorted labels of row `id`.
+async fn row_snapshot(
+    backend: &Arc<dyn Backend>,
+    id: i32,
+) -> (String, Option<chrono::NaiveDateTime>, Vec<(String, String)>) {
+    let pools = backend.as_local().unwrap().db().await.unwrap();
+    let row = sandbox_entity::Entity::find_by_id(id)
+        .one(pools.read())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut labels = sandbox_label_entity::Entity::find()
+        .filter(sandbox_label_entity::Column::SandboxId.eq(id))
+        .all(pools.read())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|label| (label.key, label.value))
+        .collect::<Vec<_>>();
+    labels.sort();
+    (row.config, row.updated_at, labels)
+}
+
+fn assert_replaced(error: crate::MicrosandboxError, name: &str, expected: i32, actual: i32) {
+    assert!(
+        matches!(
+            &error,
+            crate::MicrosandboxError::SandboxReplaced {
+                name: replaced,
+                expected: stale,
+                actual: current,
+            } if replaced == name
+                && *stale == format!("local:{expected}")
+                && *current == format!("local:{actual}")
+        ),
+        "expected SandboxReplaced, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn modify_builder_refuses_a_recreated_name() {
+    let temp = tempdir().unwrap();
+    let backend = identity_test_backend(temp.path()).await;
+    let mut original = config(2, 1024);
+    original
+        .spec
+        .labels
+        .insert("generation".into(), "old".into());
+    let original_id = insert_stopped_row(&backend, &original).await;
+    let builder = backend
+        .sandboxes()
+        .get(backend.clone(), "api")
+        .await
+        .unwrap()
+        .modify()
+        .env("MODIFIED", "yes")
+        .label("generation", "modified")
+        .cpus(4);
+
+    let mut replacement = config(1, 512);
+    replacement
+        .spec
+        .labels
+        .insert("generation".into(), "new".into());
+    let replacement_id = recreate_row(&backend, original_id, &replacement).await;
+    let before = row_snapshot(&backend, replacement_id).await;
+
+    let planned = builder.clone().dry_run().await.unwrap_err();
+    assert_replaced(planned, "api", original_id, replacement_id);
+    let applied = builder.apply().await.unwrap_err();
+    assert_replaced(applied, "api", original_id, replacement_id);
+
+    assert_eq!(row_snapshot(&backend, replacement_id).await, before);
+}
+
+#[tokio::test]
+async fn persist_config_refuses_a_replaced_row() {
+    let temp = tempdir().unwrap();
+    let backend = identity_test_backend(temp.path()).await;
+    let original = config(2, 1024);
+    let original_id = insert_stopped_row(&backend, &original).await;
+    let handle = backend
+        .sandboxes()
+        .get(backend.clone(), "api")
+        .await
+        .unwrap();
+
+    let mut replacement = config(1, 512);
+    replacement.spec.labels.insert("owner".into(), "new".into());
+    let replacement_id = recreate_row(&backend, original_id, &replacement).await;
+    let before = row_snapshot(&backend, replacement_id).await;
+    let mut updated = original;
+    updated.spec.labels.insert("owner".into(), "stale".into());
+
+    let error = persist_config(&backend, &handle, &updated)
+        .await
+        .unwrap_err();
+    assert_replaced(error, "api", original_id, replacement_id);
+    assert_eq!(row_snapshot(&backend, replacement_id).await, before);
+
+    let pools = backend.as_local().unwrap().db().await.unwrap();
+    sandbox_entity::Entity::delete_by_id(replacement_id)
+        .exec(pools.write())
+        .await
+        .unwrap();
+    let error = persist_config(&backend, &handle, &updated)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::MicrosandboxError::SandboxNotFound(name) if name == "api"),
+        "expected SandboxNotFound, got {error:?}"
+    );
+}
+
+/// Insert a running row whose live run is owned by this test process.
+#[cfg(unix)]
+async fn insert_running_row(backend: &Arc<dyn Backend>, config: &SandboxConfig) -> i32 {
+    let pools = backend.as_local().unwrap().db().await.unwrap();
+    sandbox_entity::ActiveModel {
+        name: Set(config.spec.name.clone()),
+        config: Set(serde_json::to_string(config).unwrap()),
+        active_config: Set(None),
+        status: Set(SandboxStatus::Running),
+        ephemeral: Set(false),
+        created_at: Set(None),
+        updated_at: Set(None),
+        ..Default::default()
+    }
+    .insert(pools.write())
+    .await
+    .unwrap()
+    .id
+}
+
+/// Start a new live run for row `sandbox_id`, ending any earlier one.
+#[cfg(unix)]
+async fn start_test_run(backend: &Arc<dyn Backend>, sandbox_id: i32) -> SandboxRunIdentity {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    let pools = backend.as_local().unwrap().db().await.unwrap();
+    let pid = std::process::id() as i32;
+    for (sql, values) in [
+        (
+            "UPDATE run SET status = 'Terminated' WHERE sandbox_id = ?",
+            vec![sandbox_id.into()],
+        ),
+        (
+            "INSERT INTO run (sandbox_id, pid, status) VALUES (?, ?, 'Running')",
+            vec![sandbox_id.into(), pid.into()],
+        ),
+    ] {
+        pools
+            .write()
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                sql,
+                values,
+            ))
+            .await
+            .unwrap();
+    }
+    let run = LocalBackend::load_active_run(pools.read(), sandbox_id)
+        .await
+        .unwrap()
+        .unwrap();
+    SandboxRunIdentity {
+        sandbox_id,
+        run_id: run.id,
+        pid,
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_root_grow_reaches_only_the_captured_run() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let backend = identity_test_backend(home.path()).await;
+    let local = backend.as_local().unwrap();
+    let agent = crate::runtime::sandbox_agent_socket_path_candidates_for(local, "api").remove(0);
+    let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+
+    let original_id = insert_running_row(&backend, &config(2, 1024)).await;
+    let planned = start_test_run(&backend, original_id).await;
+    let restarted = start_test_run(&backend, original_id).await;
+    let error = grow_root_disk_live(local, "api", planned, 64)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("changed runtime"),
+        "expected a runtime change refusal, got {error:?}"
+    );
+
+    let pools = local.db().await.unwrap();
+    sandbox_entity::Entity::delete_by_id(original_id)
+        .exec(pools.write())
+        .await
+        .unwrap();
+    let replacement_id = insert_running_row(&backend, &config(1, 512)).await;
+    let replacement = start_test_run(&backend, replacement_id).await;
+    let error = grow_root_disk_live(local, "api", restarted, 64)
+        .await
+        .unwrap_err();
+    assert_replaced(error, "api", original_id, replacement_id);
+
+    // Refused requests never connect, so nothing is queued on the endpoint.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+
+    let size_bytes = 64 * 1024 * 1024u64;
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "{\"op\":\"capabilities\"}\n");
+        stream
+            .get_mut()
+            .write_all(b"{\"ok\":true,\"capabilities\":{\"root_disk_grow\":true,\"cpu_resize\":false,\"memory_resize\":false,\"secrets_update\":false}}\n")
+            .await
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["op"], "root_disk_grow");
+        assert_eq!(request["size_bytes"], size_bytes);
+        let response = serde_json::json!({"ok": true, "root_disk": {
+            "filesystem_bytes": size_bytes, "device_bytes": size_bytes,
+            "total_us": 0, "pause_us": 0, "guest_us": 0
+        }});
+        stream
+            .get_mut()
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .unwrap();
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        grow_root_disk_live(local, "api", replacement, 64),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn offline_root_grow_refuses_a_replaced_row() {
+    let temp = tempdir().unwrap();
+    let backend = identity_test_backend(temp.path()).await;
+    let original = oci_config_with_upper(64);
+    let original_id = insert_stopped_row(&backend, &original).await;
+    let replacement_id = recreate_row(&backend, original_id, &oci_config_with_upper(32)).await;
+    let upper = backend
+        .as_local()
+        .unwrap()
+        .sandboxes_dir()
+        .join("api")
+        .join("upper.ext4");
+    std::fs::create_dir_all(upper.parent().unwrap()).unwrap();
+    std::fs::write(&upper, vec![0; 4096]).unwrap();
+
+    let error = grow_root_disk_now(&backend, "api", original_id, &original, 128)
+        .await
+        .unwrap_err();
+
+    assert_replaced(error, "api", original_id, replacement_id);
+    assert_eq!(std::fs::metadata(&upper).unwrap().len(), 4096);
+}
+
 #[test]
 fn running_resource_changes_require_restart_until_live_resize_lands() {
     let patch = SandboxModificationPatch {

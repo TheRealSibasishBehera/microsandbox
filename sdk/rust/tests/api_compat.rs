@@ -70,6 +70,21 @@ fn rust_identity_and_generated_patch_surface_is_backend_neutral() {
     );
 }
 
+#[test]
+fn rust_modify_surface_is_backend_neutral() {
+    use microsandbox::sandbox::SandboxHandle;
+    use microsandbox::{Sandbox, SandboxModificationBuilder};
+
+    // Coerce each receiver to a function pointer so a build that drops either
+    // method behind a backend feature fails to compile.
+    let _: fn(&Sandbox) -> SandboxModificationBuilder = Sandbox::modify;
+    let _: fn(&SandboxHandle) -> SandboxModificationBuilder = SandboxHandle::modify;
+    let _ = SandboxModificationBuilder::dry_run;
+    let _ = SandboxModificationBuilder::apply;
+    let _: Option<microsandbox::SandboxModificationPlan> = None;
+    let _ = microsandbox::ModificationPolicy::NoRestart;
+}
+
 #[allow(dead_code)]
 async fn rust_sandbox_fs_handle_api_stays_available(
     fs: &microsandbox::sandbox::SandboxFsOps<'_>,

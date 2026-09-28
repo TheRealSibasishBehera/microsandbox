@@ -15,9 +15,12 @@ use microsandbox_types::{EnvVar, RootDisk, RootfsSource};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
 use crate::MicrosandboxResult;
+use crate::backend::LocalBackend;
+use crate::backend::local::control_session_for_run;
 use crate::backend::{Backend, ControlSession};
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
+use crate::sandbox::identity::SandboxRunIdentity;
 use crate::sandbox::{SandboxConfig, SandboxHandle, SandboxStatus};
 
 //--------------------------------------------------------------------------------------------------
@@ -85,14 +88,15 @@ struct LiveControl {
 pub(crate) async fn dry_run(
     backend: Arc<dyn Backend>,
     name: String,
+    expected_id: i32,
     patch: SandboxModificationPatch,
     policy: ModificationPolicy,
 ) -> MicrosandboxResult<SandboxModificationPlan> {
-    let handle = backend.sandboxes().get(backend.clone(), &name).await?;
+    let handle = identified_handle(&backend, &name, expected_id).await?;
     let status = handle.status_snapshot();
     let config = handle.config()?;
     let active = handle.active_config().ok().flatten();
-    let (live, _) = live_control(&backend, &name, status, &patch, policy).await?;
+    let (live, _) = live_control(&backend, &name, expected_id, status, &patch, policy).await?;
     Ok(build_plan(
         name,
         status,
@@ -107,10 +111,11 @@ pub(crate) async fn dry_run(
 pub(crate) async fn apply(
     backend: Arc<dyn Backend>,
     name: String,
+    expected_id: i32,
     patch: SandboxModificationPatch,
     policy: ModificationPolicy,
 ) -> MicrosandboxResult<SandboxModificationPlan> {
-    let handle = backend.sandboxes().get(backend.clone(), &name).await?;
+    let handle = identified_handle(&backend, &name, expected_id).await?;
     let status = handle.status_snapshot();
     let mut config = handle.config()?;
     // A failed restore can still own staged immutable lower layers. Do not let
@@ -118,7 +123,8 @@ pub(crate) async fn apply(
     crate::LocalBackend::validate_completed_restore(&config)?;
     let mut active = handle.active_config().ok().flatten();
     let mut active_json = handle.active_config_json().map(str::to_owned);
-    let (live, session) = live_control(&backend, &name, status, &patch, policy).await?;
+    let (live, session) =
+        live_control(&backend, &name, expected_id, status, &patch, policy).await?;
     let mut plan = build_plan(
         name.clone(),
         status,
@@ -166,6 +172,7 @@ pub(crate) async fn apply(
             active.spec.resources.cpus = target;
             persist_active_config(
                 &backend,
+                &name,
                 control_session(&session)?,
                 &mut active_json,
                 active,
@@ -198,6 +205,7 @@ pub(crate) async fn apply(
             active.spec.resources.memory_mib = state.target_mib as u32;
             persist_active_config(
                 &backend,
+                &name,
                 control_session(&session)?,
                 &mut active_json,
                 active,
@@ -216,6 +224,7 @@ pub(crate) async fn apply(
                 apply_secret_patch_to_config(active, &patch)?;
                 persist_active_config(
                     &backend,
+                    &name,
                     control_session(&session)?,
                     &mut active_json,
                     active,
@@ -229,18 +238,11 @@ pub(crate) async fn apply(
         && policy == ModificationPolicy::NoRestart
         && let Some(target_mib) = root_disk_grow_target(&plan, &patch, &config)
     {
-        let size_bytes = u64::from(target_mib) * 1024 * 1024;
-        let observed = control_session(&session)?
-            .request(&GrowRootDisk(
-                microsandbox_protocol::control::RootDiskGrow { size_bytes },
-            ))
-            .await
-            .map_err(crate::MicrosandboxError::ControlClient)?;
-        if observed.filesystem_bytes != size_bytes || observed.device_bytes < size_bytes {
-            return Err(crate::MicrosandboxError::Runtime(
-                "root growth did not confirm usable capacity".into(),
-            ));
-        }
+        let local_backend = backend
+            .as_local()
+            .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
+        let run = control_session(&session)?.run_identity();
+        grow_root_disk_live(local_backend, &name, run, target_mib).await?;
         if let Some(active) = active.as_mut() {
             let disk_patch = SandboxModificationPatch {
                 root_disk_size_mib: Some(target_mib),
@@ -249,6 +251,7 @@ pub(crate) async fn apply(
             apply_patch_to_config(active, &disk_patch);
             persist_active_config(
                 &backend,
+                &name,
                 control_session(&session)?,
                 &mut active_json,
                 active,
@@ -263,7 +266,7 @@ pub(crate) async fn apply(
     if let Some(target_mib) = root_disk_grow_target(&plan, &patch, &config)
         && (stopped_status(status) || restart_required)
     {
-        grow_root_disk_now(&backend, &name, &config, target_mib).await?;
+        grow_root_disk_now(&backend, &name, expected_id, &config, target_mib).await?;
     }
     if !plan.changes.is_empty() {
         apply_patch_to_config(&mut config, &patch);
@@ -402,10 +405,39 @@ fn root_disk_grow_target(
     }
 }
 
+/// Grow the running root disk through the runtime generation whose
+/// capabilities planned it, never whichever runtime now owns the name.
+async fn grow_root_disk_live(
+    local_backend: &LocalBackend,
+    name: &str,
+    run: SandboxRunIdentity,
+    target_mib: u32,
+) -> MicrosandboxResult<()> {
+    let size_bytes = u64::from(target_mib) * 1024 * 1024;
+    let _transition =
+        LocalBackend::acquire_sandbox_transition_guard(&local_backend.config().run_dir(), name)
+            .await?;
+    local_backend.validate_control_run(name, run).await?;
+    let observed = control_session_for_run(local_backend, name, run)
+        .await?
+        .request(&GrowRootDisk(
+            microsandbox_protocol::control::RootDiskGrow { size_bytes },
+        ))
+        .await
+        .map_err(crate::MicrosandboxError::ControlClient)?;
+    if observed.filesystem_bytes != size_bytes || observed.device_bytes < size_bytes {
+        return Err(crate::MicrosandboxError::Runtime(
+            "root growth did not confirm usable capacity".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Grow the sandbox-owned layered upper or flat root disk while it is stopped.
 async fn grow_root_disk_now(
     backend: &Arc<dyn Backend>,
     name: &str,
+    expected_id: i32,
     config: &SandboxConfig,
     target_mib: u32,
 ) -> MicrosandboxResult<()> {
@@ -415,6 +447,15 @@ async fn grow_root_disk_now(
             UnsupportedReason::LocalOnly,
         )
     })?;
+    // Create and remove hold this guard across their row and storage changes,
+    // so the row checked here owns the directory until growth finishes.
+    let _transition =
+        LocalBackend::acquire_sandbox_transition_guard(&local_backend.config().run_dir(), name)
+            .await?;
+    match current_sandbox_id(backend, name).await? {
+        Some(actual) => super::ensure_local_identity(name, Some(expected_id), actual)?,
+        None => return Err(crate::MicrosandboxError::SandboxNotFound(name.to_string())),
+    }
     let sandbox_dir = local_backend.sandboxes_dir().join(name);
     let runtime_dir = sandbox_dir.join("runtime");
     let handled = tokio::task::spawn_blocking(move || {
@@ -452,6 +493,7 @@ async fn grow_root_disk_now(
 async fn live_control(
     backend: &Arc<dyn Backend>,
     name: &str,
+    expected_id: i32,
     status: SandboxStatus,
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
@@ -470,6 +512,7 @@ async fn live_control(
     let Some(session) = local.control_session(name).await? else {
         return Ok((LiveControl::default(), None));
     };
+    super::ensure_local_identity(name, Some(expected_id), session.run_identity().sandbox_id)?;
     let caps = session.capabilities();
     Ok((
         LiveControl {
@@ -956,12 +999,12 @@ async fn persist_config(
     let write_db = local_backend.db().await?.write();
     let config_json = serde_json::to_string(config)?;
 
-    write_db
-        .transaction(|txn| {
+    let updated = write_db
+        .transaction::<_, _, _, crate::MicrosandboxError>(|txn| {
             let config_json = config_json.clone();
             let labels = labels.clone();
             async move {
-                sandbox_entity::Entity::update_many()
+                let updated = sandbox_entity::Entity::update_many()
                     .col_expr(sandbox_entity::Column::Config, Expr::value(config_json))
                     .col_expr(
                         sandbox_entity::Column::UpdatedAt,
@@ -969,7 +1012,11 @@ async fn persist_config(
                     )
                     .filter(sandbox_entity::Column::Id.eq(local.db_id))
                     .exec(&txn)
-                    .await?;
+                    .await?
+                    .rows_affected;
+                if updated == 0 {
+                    return Ok((txn, false));
+                }
 
                 sandbox_label_entity::Entity::delete_many()
                     .filter(sandbox_label_entity::Column::SandboxId.eq(local.db_id))
@@ -987,14 +1034,19 @@ async fn persist_config(
                     .await?;
                 }
 
-                Ok((txn, ()))
+                Ok((txn, true))
             }
         })
-        .await
+        .await?;
+    if !updated {
+        return Err(replaced_error(backend, handle.name(), local.db_id).await);
+    }
+    Ok(())
 }
 
 async fn persist_active_config(
     backend: &Arc<dyn Backend>,
+    name: &str,
     session: &ControlSession,
     expected: &mut Option<String>,
     active: &SandboxConfig,
@@ -1002,15 +1054,71 @@ async fn persist_active_config(
     let local_backend = backend
         .as_local()
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
-    let json = session
+    let json = match session
         .persist_active_config(
             local_backend.db().await?.write(),
             expected.as_deref(),
             active,
         )
-        .await?;
+        .await
+    {
+        Ok(json) => json,
+        Err(error @ crate::MicrosandboxError::ControlStateChanged) => {
+            let sandbox_id = session.run_identity().sandbox_id;
+            if current_sandbox_id(backend, name).await? == Some(sandbox_id) {
+                return Err(error);
+            }
+            return Err(replaced_error(backend, name, sandbox_id).await);
+        }
+        Err(error) => return Err(error),
+    };
     *expected = Some(json);
     Ok(())
+}
+
+/// Load the handle for `name`, refusing a row other than the captured one.
+async fn identified_handle(
+    backend: &Arc<dyn Backend>,
+    name: &str,
+    expected_id: i32,
+) -> MicrosandboxResult<SandboxHandle> {
+    let local_backend = backend
+        .as_local()
+        .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
+    local_backend
+        .sandbox_handle(backend.clone(), name, Some(expected_id))
+        .await
+}
+
+/// Row id the name currently resolves to, if any.
+async fn current_sandbox_id(
+    backend: &Arc<dyn Backend>,
+    name: &str,
+) -> MicrosandboxResult<Option<i32>> {
+    let local_backend = backend
+        .as_local()
+        .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
+    let pools = local_backend.db().await?;
+    Ok(microsandbox_db::catalog::sandbox_query(pools.read())
+        .await?
+        .filter(sandbox_entity::Column::Name.eq(name))
+        .one(pools.read())
+        .await?
+        .map(|model| model.id))
+}
+
+/// Explain a write conditioned on `expected_id` that matched no row: the
+/// name now belongs to a replacement, or no longer exists.
+async fn replaced_error(
+    backend: &Arc<dyn Backend>,
+    name: &str,
+    expected_id: i32,
+) -> crate::MicrosandboxError {
+    match current_sandbox_id(backend, name).await {
+        Ok(Some(actual)) => super::sandbox_replaced(name, expected_id, actual),
+        Ok(None) => crate::MicrosandboxError::SandboxNotFound(name.to_string()),
+        Err(error) => error,
+    }
 }
 
 async fn start_after_modify(handle: &SandboxHandle) -> MicrosandboxResult<()> {

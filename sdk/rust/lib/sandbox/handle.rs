@@ -21,9 +21,9 @@ use crate::{
     error::Operation,
 };
 
-#[cfg(feature = "local")]
-use super::SandboxModificationBuilder;
-use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult};
+use super::{
+    Sandbox, SandboxConfig, SandboxId, SandboxModificationBuilder, SandboxStatus, SandboxStopResult,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -285,10 +285,11 @@ impl SandboxHandle {
     ///
     /// The builder fetches a fresh handle during [`dry_run`](SandboxModificationBuilder::dry_run)
     /// so planning uses current status and persisted config rather than this
-    /// handle's possibly stale snapshot.
-    #[cfg(feature = "local")]
+    /// handle's possibly stale snapshot. The builder stays bound to this
+    /// sandbox: if the name now refers to a replacement, planning and applying
+    /// return [`MicrosandboxError::SandboxReplaced`].
     pub fn modify(&self) -> SandboxModificationBuilder {
-        SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+        SandboxModificationBuilder::new(self.backend.clone(), self.name.clone(), self.identity())
     }
 
     /// Compact sealed backing layers of the root and sandbox-owned data disks, running or stopped.
