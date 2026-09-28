@@ -81,6 +81,10 @@ fn rust_modify_surface_is_backend_neutral() {
     let _: fn(&SandboxHandle) -> SandboxModificationBuilder = SandboxHandle::modify;
     let _ = SandboxModificationBuilder::dry_run;
     let _ = SandboxModificationBuilder::apply;
+    let _ = |sandbox: &Sandbox, handle: &SandboxHandle| {
+        drop(sandbox.resume_modification("operation-id"));
+        drop(handle.resume_modification(String::from("operation-id")));
+    };
     let _: Option<microsandbox::SandboxModificationPlan> = None;
     let _ = microsandbox::ModificationPolicy::NoRestart;
 }

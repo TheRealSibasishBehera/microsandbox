@@ -204,6 +204,31 @@ fn assert_replaced(error: crate::MicrosandboxError, name: &str, expected: i32, a
 }
 
 #[tokio::test]
+async fn local_modifications_are_not_resumable_operations() {
+    let temp = tempdir().unwrap();
+    let backend = identity_test_backend(temp.path()).await;
+    insert_stopped_row(&backend, &config(2, 1024)).await;
+    let handle = backend
+        .sandboxes()
+        .get(backend.clone(), "api")
+        .await
+        .unwrap();
+
+    let error = handle.resume_modification("op-1").await.unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            crate::MicrosandboxError::Unsupported {
+                op: crate::Operation::SandboxModify,
+                reason: crate::UnsupportedReason::NotAvailable(_),
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn modify_builder_refuses_a_recreated_name() {
     let temp = tempdir().unwrap();
     let backend = identity_test_backend(temp.path()).await;
@@ -1849,6 +1874,41 @@ fn stopped_secret_changes_are_next_start_and_apply_supported() {
         vec![ModificationDisposition::NextStart]
     );
     assert!(validate_apply_supported(&plan).is_ok());
+}
+
+/// Cloud dry runs carry no value, so a plan must depend only on whether material
+/// is present, and must never contain it.
+#[cfg(feature = "net")]
+#[tokio::test]
+async fn value_only_rotation_plans_the_same_for_any_value() {
+    let temp = tempdir().unwrap();
+    let backend = identity_test_backend(temp.path()).await;
+    insert_stopped_row(&backend, &config_with_secret("API_KEY", SECRET_SENTINEL)).await;
+    let handle = backend
+        .sandboxes()
+        .get(backend.clone(), "api")
+        .await
+        .unwrap();
+
+    let mut plans = Vec::new();
+    for value in ["first-rotated-material", "second, longer rotated material"] {
+        let plan = handle
+            .modify()
+            .secret(|secret| secret.env("API_KEY").value(value))
+            .dry_run()
+            .await
+            .unwrap();
+        assert_eq!(secret_plan_kinds(&plan), vec![SecretChangeKind::Rotated]);
+        assert_eq!(
+            secret_plan_dispositions(&plan),
+            vec![ModificationDisposition::NextStart]
+        );
+        let plan = serde_json::to_string(&plan).unwrap();
+        assert!(!plan.contains(value));
+        assert!(!plan.contains(SECRET_SENTINEL));
+        plans.push(plan);
+    }
+    assert_eq!(plans[0], plans[1]);
 }
 
 #[cfg(feature = "net")]

@@ -215,6 +215,10 @@ impl SandboxModificationBuilder {
     /// `tls` change and, like every other restart-backed change, needs
     /// `restart` or `next_start` on a running sandbox. Existing secrets that
     /// opt out of TLS identity continue to support live plain-HTTP updates.
+    ///
+    /// On the cloud backend, a request that gets no response is retried with
+    /// the same idempotency key. If every retry fails the error carries no
+    /// operation id, and applying the same change again is safe.
     pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
         self.backend
             .sandboxes()
