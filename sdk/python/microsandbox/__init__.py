@@ -129,6 +129,7 @@ from microsandbox.types import (
     GiB,
     GuestFlush,
     HostPermissions,
+    HttpConfig,
     ImageArchiveFormat,
     ImageSource,
     ImageSourceKind,
@@ -320,6 +321,7 @@ __all__ = [
     "SecretSubstitution",
     "ScopedUpstreamCACert",
     "ScopedVerifyUpstream",
+    "HttpConfig",
     "TlsConfig",
     "ViolationAction",
     # Images / rootfs
