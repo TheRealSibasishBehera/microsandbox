@@ -1766,8 +1766,14 @@ class VsockRoute:
 class HttpConfig:
     """HTTP denial response settings. ``{host}`` names the blocked host."""
 
+    deny_response: bool = False
+    """Enable readable HTTP denial responses. Disabled by default."""
+
     deny_message: str | None = None
-    """Custom body; ``None`` uses the default and an empty string sends no body."""
+    """Body used when deny_response is enabled.
+
+    ``None`` uses the built-in message; an empty string sends no body.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -1796,12 +1802,17 @@ class Network:
     ipv6_pool: str | None = None
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
+    nat64_prefixes: tuple[str, ...] = field(default=("64:ff9b::/96",), kw_only=True)
+    """NAT64 /96 prefixes used for policy classification."""
     max_connections: int | None = None
     """Deprecated: use ``max_tcp_connections`` instead."""
     max_tcp_connections: int | None = field(default=None, kw_only=True)
     max_udp_connections: int | None = field(default=None, kw_only=True)
     """UDP session limit. Defaults to unlimited for single-tenant and 1024 for
     multi-tenant; zero means unlimited."""
+    tcp_accept_queue_size: int | None = field(default=None, kw_only=True)
+    """Accept-queue depth for published TCP port listeners, 1 to 2147483647.
+    Defaults to 1024; the host kernel clamps it to its own ``somaxconn``."""
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG
@@ -1860,6 +1871,8 @@ class Network:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None and self.max_tcp_connections is not None:
             raise ValueError("max_connections and max_tcp_connections are mutually exclusive")
+        if self.nat64_prefixes:
+            d["nat64_prefixes"] = list(self.nat64_prefixes)
         if self.max_connections is not None:
             warnings.warn(
                 "max_connections is deprecated; use max_tcp_connections",
@@ -1871,6 +1884,8 @@ class Network:
             d["max_tcp_connections"] = self.max_tcp_connections
         if self.max_udp_connections is not None:
             d["max_udp_connections"] = self.max_udp_connections
+        if self.tcp_accept_queue_size is not None:
+            d["tcp_accept_queue_size"] = self.tcp_accept_queue_size
         if self.rate_limiter is not None:
             if not isinstance(self.rate_limiter, NetworkRateLimiter):
                 raise TypeError("Network.rate_limiter must be NetworkRateLimiter or None")
@@ -1885,10 +1900,13 @@ class Network:
         if self.http is not None:
             if not isinstance(self.http, HttpConfig):
                 raise TypeError("Network.http must be HttpConfig or None")
+            if not isinstance(self.http.deny_response, bool):
+                raise TypeError("HttpConfig.deny_response must be a bool")
+            d["http"] = {"deny_response": self.http.deny_response}
             if self.http.deny_message is not None:
                 if not isinstance(self.http.deny_message, str):
                     raise TypeError("HttpConfig.deny_message must be a str or None")
-                d["http"] = {"deny_message": self.http.deny_message}
+                d["http"]["deny_message"] = self.http.deny_message
         return d
 
 

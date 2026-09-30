@@ -987,10 +987,15 @@ struct NetworkOpts {
     /// Ports nested inside network with explicit bind addresses.
     #[serde(default)]
     port_bindings: Vec<PortBindingOpts>,
+    /// Accept-queue depth for published TCP port listeners.
+    tcp_accept_queue_size: Option<u32>,
     /// IPv4 pool used to derive per-sandbox /30 guest subnets.
     ipv4_pool: Option<String>,
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
     ipv6_pool: Option<String>,
+    /// NAT64 /96 prefixes for policy classification.
+    #[serde(default)]
+    nat64_prefixes: Vec<String>,
     #[serde(alias = "max_connections")]
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
@@ -1436,6 +1441,12 @@ fn apply_network(
             .map_err(|e| FfiError::invalid_argument(format!("ipv6_pool {raw:?}: {e}")))?;
         builder = builder.network(|n| n.ipv6_pool(pool));
     }
+    for raw in &net.nat64_prefixes {
+        let prefix: ipnetwork::Ipv6Network = raw.parse().map_err(|e| {
+            FfiError::invalid_argument(format!("nat64_prefixes entry {raw:?}: {e}"))
+        })?;
+        builder = builder.network(|n| n.nat64_prefix(prefix));
+    }
 
     // DNS configuration. Either nested `dns: {...}` or the legacy flat
     // `dns_rebind_protection` field. The nested form wins.
@@ -1526,6 +1537,9 @@ fn apply_network(
     if let Some(max) = net.max_udp_connections {
         builder = builder.network(move |n| n.max_udp_connections(max));
     }
+    if let Some(size) = net.tcp_accept_queue_size {
+        builder = builder.network(move |n| n.tcp_accept_queue_size(size));
+    }
 
     // Strict hostname policy.
     if let Some(strict) = net.strict {
@@ -1555,13 +1569,12 @@ fn apply_network(
     }
 
     // Body returned to HTTP/HTTPS clients when egress is denied.
-    if let Some(message) = net
-        .http
-        .as_ref()
-        .and_then(|http| http.deny_message.as_ref())
-    {
-        let message = message.clone();
-        builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
+    if let Some(http) = net.http.as_ref() {
+        builder = builder.network(|n| n.http(|h| h.deny_response(http.deny_response)));
+        if let Some(message) = http.deny_message.as_ref() {
+            let message = message.clone();
+            builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
+        }
     }
 
     // Sandbox-wide secret violation action.
@@ -3614,7 +3627,7 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
         };
         Ok(Box::pin(async move {
             let mut builder = if let Some(live) = live {
-                live.branch_many(request.names)
+                live.fork_many(request.names)
             } else {
                 let source = Sandbox::get(&source).await.map_err(FfiError::from)?;
                 if let Some(expected) = request.source_identity.filter(|id| !id.is_empty())
@@ -3626,13 +3639,13 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
                         actual: source.id().to_string(),
                     }));
                 }
-                source.branch_many(request.names)
+                source.fork_many(request.names)
             };
             builder = builder.guest_flush(request.guest_flush);
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            let outcomes = builder.branch().await.map_err(FfiError::from)?;
+            let outcomes = builder.fork().await.map_err(FfiError::from)?;
             let mut rows = Vec::with_capacity(outcomes.len());
             for outcome in outcomes {
                 let row = match outcome.result {
@@ -3681,17 +3694,17 @@ pub unsafe extern "C" fn msb_sandbox_branch_with_options(
         };
         Ok(Box::pin(async move {
             let mut builder = if let Some(live) = live {
-                live.branch(child)
+                live.fork(child)
             } else {
                 Sandbox::get(&source)
                     .await
                     .map_err(FfiError::from)?
-                    .branch(child)
+                    .fork(child)
             };
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            let sb = builder.branch().await.map_err(FfiError::from)?;
+            let sb = builder.fork().await.map_err(FfiError::from)?;
             let backend_kind = sb.backend_kind().as_str();
             let handle = register(sb)?;
             Ok(serde_json::json!({ "handle": handle, "backend_kind": backend_kind }).to_string())
@@ -7916,6 +7929,23 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn network_accept_queue_size_reaches_the_sandbox_config() {
+        let omitted: super::NetworkOpts = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(omitted.tcp_accept_queue_size, None);
+
+        let net: super::NetworkOpts = serde_json::from_value(serde_json::json!({
+            "ports": {"8080": 80}, "tcp_accept_queue_size": 4096
+        }))
+        .unwrap();
+        let builder = microsandbox::Sandbox::builder("accept-queue").image("alpine");
+        let Ok(builder) = super::apply_network(builder, &net) else {
+            panic!("apply_network rejected a valid accept queue size");
+        };
+        let config = builder.build().await.unwrap();
+        assert_eq!(config.spec.network.tcp_accept_queue_size, Some(4096));
     }
 
     use super::*;

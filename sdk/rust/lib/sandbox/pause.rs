@@ -518,7 +518,7 @@ mod tests {
             ));
         }
         assert!(matches!(
-            stale.branch("child").branch().await,
+            stale.fork("child").fork().await,
             Err(MicrosandboxError::SandboxReplaced { .. })
         ));
         for result in [
@@ -532,7 +532,7 @@ mod tests {
             ));
         }
         assert!(matches!(
-            live.branch("child").branch().await,
+            live.fork("child").fork().await,
             Err(MicrosandboxError::SandboxReplaced { .. })
         ));
         assert!(!backend.sandboxes_dir().join("child").exists());

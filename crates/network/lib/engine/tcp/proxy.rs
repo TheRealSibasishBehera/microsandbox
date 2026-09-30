@@ -263,13 +263,15 @@ impl TcpProxy {
                         source = source.label(),
                         "TCP egress denied by domain policy",
                     );
-                    initial_buf = peek_for_http_request(
-                        &mut from_smoltcp,
-                        initial_buf,
-                        PEEK_BUF_SIZE,
-                        PEEK_BUDGET.saturating_sub(peek_started.elapsed()),
-                    )
-                    .await;
+                    if shared.http_deny_response_enabled() {
+                        initial_buf = peek_for_http_request(
+                            &mut from_smoltcp,
+                            initial_buf,
+                            PEEK_BUF_SIZE,
+                            PEEK_BUDGET.saturating_sub(peek_started.elapsed()),
+                        )
+                        .await;
+                    }
                     return deny_http_or_close(
                         guest_dst,
                         sni.as_deref(),
@@ -282,13 +284,15 @@ impl TcpProxy {
                 }
                 EgressEvaluation::DeferUntilHostname => {
                     debug_assert!(false, "DeferUntilHostname leaked into TCP proxy task");
-                    initial_buf = peek_for_http_request(
-                        &mut from_smoltcp,
-                        initial_buf,
-                        PEEK_BUF_SIZE,
-                        PEEK_BUDGET.saturating_sub(peek_started.elapsed()),
-                    )
-                    .await;
+                    if shared.http_deny_response_enabled() {
+                        initial_buf = peek_for_http_request(
+                            &mut from_smoltcp,
+                            initial_buf,
+                            PEEK_BUF_SIZE,
+                            PEEK_BUDGET.saturating_sub(peek_started.elapsed()),
+                        )
+                        .await;
+                    }
                     return deny_http_or_close(
                         guest_dst,
                         sni.as_deref(),
@@ -419,7 +423,6 @@ impl TcpProxy {
                     // that actually carries a placeholder is reallocated.
                     Ok(cow) => cow,
                     Err(action) => {
-                        tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
                         if matches!(action, SecretViolationAction::BlockAndTerminate) {
                             shared.trigger_termination();
                         }
@@ -485,7 +488,6 @@ impl TcpProxy {
                                 Some(h) => match h.substitute(&bytes) {
                                     Ok(cow) => cow,
                                     Err(action) => {
-                                        tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation");
                                         if matches!(action, SecretViolationAction::BlockAndTerminate)
                                         {
                                             shared.trigger_termination();
@@ -636,23 +638,19 @@ async fn handle_connect_tunnel(
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     preconnected_proxy: Option<TcpStream>,
 ) -> io::Result<()> {
-    let proxy_dst = proxy_target.primary();
     let connect_req =
         parse_connect_request(buffer_connect_request(initial_buf, &mut from_smoltcp).await?)?;
 
-    let connect_headers = match sanitize_connect_headers(
-        connect_req.header_bytes(),
-        &tls_state.secrets.load(),
-    ) {
-        Ok(headers) => headers,
-        Err(action) => {
-            tracing::warn!(dst = %proxy_dst, violation = ?action, "secret violation in CONNECT headers");
-            if matches!(action, SecretViolationAction::BlockAndTerminate) {
-                shared.trigger_termination();
+    let connect_headers =
+        match sanitize_connect_headers(connect_req.header_bytes(), &tls_state.secrets.load()) {
+            Ok(headers) => headers,
+            Err(action) => {
+                if matches!(action, SecretViolationAction::BlockAndTerminate) {
+                    shared.trigger_termination();
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-    };
+        };
 
     // Dial the proxy and forward the CONNECT request so it opens the tunnel.
     let mut proxy_stream = match preconnected_proxy {
@@ -1057,7 +1055,7 @@ pub(crate) async fn deny_http_or_close(
     proxy_connect: &ProxyConnectState,
 ) -> io::Result<()> {
     // Reply only once a complete HTTP/1.x request line identifies the protocol.
-    let answer = first_flight_is_http(initial_buf);
+    let answer = shared.http_deny_response_enabled() && first_flight_is_http(initial_buf);
     if answer {
         let host = denied_host_label(sni, initial_buf, guest_dst);
         let body = shared.http_deny_body(&host);
@@ -1638,52 +1636,63 @@ mod tests {
 
     #[tokio::test]
     async fn domain_denial_joins_fragmented_request_without_dialing_upstream() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let dst = listener.local_addr().unwrap();
-        let shared = Arc::new(shared_with("blocked.example", "127.0.0.1"));
-        let policy = Arc::new(NetworkPolicy {
-            default_egress: Action::Deny,
-            default_ingress: Action::Allow,
-            rules: vec![allow_tcp("allowed.example", dst.port())],
-        });
-        let status = Arc::new(ProxyConnectState::new());
-        let (from_tx, from_rx) = mpsc::channel(4);
-        let (to_tx, mut to_rx) = mpsc::channel(4);
-        from_tx.send(Bytes::from_static(b"GE")).await.unwrap();
-        from_tx
-            .send(Bytes::from_static(b"T / HTTP/1.1\r\n"))
-            .await
-            .unwrap();
-        from_tx
-            .send(Bytes::from_static(b"Host: blocked.example\r\n\r\n"))
-            .await
-            .unwrap();
-        drop(from_tx);
-        TcpProxy::new(
-            dst,
-            UpstreamTcpTarget::direct(dst),
-            from_rx,
-            to_tx,
-            shared,
-            policy,
-            Arc::new(SecretsConfig::default()),
-            None,
-            false,
-            status.clone(),
-            None,
-        )
-        .try_run()
-        .await
-        .unwrap();
-        let response = to_rx.recv().await.unwrap();
-        assert!(response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
-        assert!(String::from_utf8_lossy(&response).contains("blocked.example"));
-        assert_eq!(status.status(), ProxyConnectStatus::PolicyDenied);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+        for enabled in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let dst = listener.local_addr().unwrap();
+            let shared = Arc::new(shared_with("blocked.example", "127.0.0.1"));
+            shared.set_http_config(microsandbox_types::HttpConfig {
+                deny_response: enabled,
+                deny_message: Some("blocked {host}".into()),
+            });
+            let policy = Arc::new(NetworkPolicy {
+                default_egress: Action::Deny,
+                default_ingress: Action::Allow,
+                rules: vec![allow_tcp("allowed.example", dst.port())],
+            });
+            let status = Arc::new(ProxyConnectState::new());
+            let (from_tx, from_rx) = mpsc::channel(4);
+            let (to_tx, mut to_rx) = mpsc::channel(4);
+            from_tx.send(Bytes::from_static(b"GE")).await.unwrap();
+            from_tx
+                .send(Bytes::from_static(b"T / HTTP/1.1\r\n"))
                 .await
-                .is_err()
-        );
+                .unwrap();
+            from_tx
+                .send(Bytes::from_static(b"Host: blocked.example\r\n\r\n"))
+                .await
+                .unwrap();
+            drop(from_tx);
+            TcpProxy::new(
+                dst,
+                UpstreamTcpTarget::direct(dst),
+                from_rx,
+                to_tx,
+                shared,
+                policy,
+                Arc::new(SecretsConfig::default()),
+                None,
+                false,
+                status.clone(),
+                None,
+            )
+            .try_run()
+            .await
+            .unwrap();
+            let response = to_rx.recv().await;
+            if enabled {
+                let response = response.unwrap();
+                assert!(response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+                assert!(String::from_utf8_lossy(&response).contains("blocked.example"));
+            } else {
+                assert!(response.is_none(), "disabled responses must close silently");
+            }
+            assert_eq!(status.status(), ProxyConnectStatus::PolicyDenied);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]

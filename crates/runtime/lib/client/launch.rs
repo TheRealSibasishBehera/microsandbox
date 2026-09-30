@@ -58,7 +58,12 @@ pub struct LaunchCapabilities {
     /// Older probes omit this feature; ordinary protocol-2 launches are unchanged.
     #[serde(default)]
     pub required_restore_backing: bool,
-    /// Custom HTTP denial response bodies are honored by the runtime.
+    /// Published-port listeners honor `network.tcp_accept_queue_size`. Older runtimes omit this
+    /// feature and would silently ignore the field, so the SDK refuses to send it to them.
+    #[serde(default)]
+    pub tcp_accept_queue_size: bool,
+
+    /// Readable HTTP denial responses and custom bodies are supported by the runtime.
     /// Older runtimes omit this capability.
     #[serde(default)]
     pub http_deny_message: bool,

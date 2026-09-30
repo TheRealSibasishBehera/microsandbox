@@ -230,7 +230,9 @@ export type JsFsWriteSink = FsWriteSink
 export declare class HttpBuilder {
   /** Create default HTTP settings. */
   constructor()
-  /** Set the denial response body, substituting `{host}`. */
+  /** Enable readable HTTP denial responses. Disabled by default. */
+  denyResponse(enabled: boolean): this
+  /** Set the body used when denyResponse is enabled, substituting `{host}`. */
   denyMessage(message: string): this
 }
 export type JsHttpBuilder = HttpBuilder
@@ -526,12 +528,19 @@ export declare class NetworkBuilder {
   maxTcpConnections(max: number): this
   /** Set the UDP session cap; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant. */
   maxUdpConnections(max: number): this
+  /**
+   * Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
+   * 1024; the host kernel clamps it to its own somaxconn.
+   */
+  tcpAcceptQueueSize(size: number): this
   /** Require hostname-based policy allows to use inspectable application authority. */
   strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
   ipv4Pool(pool: string): this
   /** Set the IPv6 pool used for per-sandbox /64 guest prefixes. */
   ipv6Pool(pool: string): this
+  /** Add a NAT64 /96 prefix for policy classification. */
+  nat64Prefix(prefix: string): this
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /** Configure HTTP denial responses via a callback. */
@@ -776,8 +785,10 @@ export declare class RestoreBuilder {
   snapshotBase(base: string): this
   /** Cold-boot only the disk state carried by a full snapshot. */
   diskOnly(): this
-  /** Restore a full snapshot with private copy-on-write memory. */
+  /** @deprecated Use cowMemory() instead. */
   forked(): this
+  /** Restore a full snapshot with private copy-on-write memory. */
+  cowMemory(): this
   /**
    * Validate authorized filesystem mappings strictly (default) or allow supported mismatches.
    * Neither policy inherits resources; unmapped filesystems remain unavailable.
@@ -800,6 +811,8 @@ export declare class RestoreBuilder {
   portUdp(hostPort: number, guestPort: number): this
   /** Publish a UDP port from host -> guest on a specific host bind address. */
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
+  /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
+  tcpAcceptQueueSize(size: number): this
   /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
   vsock(hostPath: string, port: number): this
   /** Expose a host Unix datagram socket on a guest-to-host vsock port. */
@@ -1110,10 +1123,14 @@ export declare class Sandbox {
   stop(): Promise<void>
   /** Warnings for unmapped external filesystems and accepted restore mismatches. */
   restoreWarnings(): Promise<Array<ExternalMountWarning>>
-  /** Create an independent local CoW child without a durable full snapshot. */
+  /** @deprecated Use fork for live execution duplication. */
   branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
-  /** Capture once and return individual child startup outcomes. */
+  /** @deprecated Use forkMany for live execution duplication. */
   branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  /** Create an independent local CoW child without a durable full snapshot. */
+  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  /** Capture once and return individual child startup outcomes. */
+  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
@@ -1516,10 +1533,14 @@ export declare class SandboxHandle {
    * ownership. No implicit kill; use `stopWithTimeout` for a bounded wait.
    */
   stop(): Promise<void>
-  /** Create an independent local CoW child without a durable full snapshot. */
+  /** @deprecated Use fork for live execution duplication. */
   branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
-  /** Capture once and return individual child startup outcomes. */
+  /** @deprecated Use forkMany for live execution duplication. */
   branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  /** Create an independent local CoW child without a durable full snapshot. */
+  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  /** Capture once and return individual child startup outcomes. */
+  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
