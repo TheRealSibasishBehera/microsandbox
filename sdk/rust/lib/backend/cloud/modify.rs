@@ -25,12 +25,14 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// How long an apply waits for its modification to settle.
+/// Time an apply or a resume waits for the modification to settle.
 const MODIFICATION_SETTLE_BUDGET: Duration = Duration::from_secs(60);
 
-/// Delay before the first operation poll; each later delay doubles.
+/// First delay for operation polls and apply retries; each later delay doubles,
+/// up to [`MODIFICATION_MAX_POLL_INTERVAL`].
 const MODIFICATION_INITIAL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Longest delay between operation polls or apply retries.
 const MODIFICATION_MAX_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Attempts per apply when no HTTP response arrives; all reuse one idempotency key.
@@ -145,8 +147,8 @@ impl CloudBackend {
             .await
     }
 
-    /// Retry only requests that got no HTTP response. A retry reuses the
-    /// idempotency key, so the server never applies the change twice.
+    /// Sends `request`, retrying only when no HTTP response arrives. Retries reuse
+    /// the idempotency key, so the server applies the change at most once.
     async fn send_modification(
         &self,
         sandbox_id: &str,
@@ -266,8 +268,8 @@ fn resolve_env(var: &str) -> Option<CloudSecretValue> {
     std::env::var(var).ok().map(CloudSecretValue::new)
 }
 
-/// Changes the Cloud does not support map to [`MicrosandboxError::Unsupported`];
-/// patches malformed on any backend map to [`MicrosandboxError::InvalidConfig`].
+/// Changes the cloud backend does not support map to [`MicrosandboxError::Unsupported`];
+/// malformed patches map to [`MicrosandboxError::InvalidConfig`].
 fn rejection_error(rejection: CloudModificationRejection) -> MicrosandboxError {
     let not_available = |rejection: CloudModificationRejection| {
         MicrosandboxError::unsupported(
@@ -548,7 +550,7 @@ mod tests {
         SandboxIdentity::Cloud(SANDBOX_ID.into())
     }
 
-    /// A patch the Cloud cannot express, and a check for the error it maps to.
+    /// Case label, a patch rejected before any request, and a check for its error.
     type RejectedPatch = (
         &'static str,
         SandboxModificationPatch,

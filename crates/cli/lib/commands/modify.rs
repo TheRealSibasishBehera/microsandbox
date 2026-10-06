@@ -771,7 +771,7 @@ fn replayed_args(args: &ModifyArgs) -> String {
     }
 }
 
-/// Where the changes of an applied plan took effect, for human output.
+/// Effect of an applied plan's changes, for human output.
 #[derive(Debug, PartialEq, Eq)]
 enum ApplyOutcome {
     /// Every change took effect now.

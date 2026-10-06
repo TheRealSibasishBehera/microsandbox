@@ -330,10 +330,8 @@ pub enum SecretChangeKind {
 
 /// When or whether a planned change can take effect.
 ///
-/// Serialized as a plain string. Non-exhaustive: backends may report
-/// dispositions added after this release. Those decode as
-/// [`Unknown`](Self::Unknown) and serialize back to the same string, so
-/// matches outside this crate need a wildcard arm.
+/// Serialized as a plain string. Dispositions from newer backends decode as
+/// [`Unknown`](Self::Unknown) and serialize back unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[non_exhaustive]
@@ -354,9 +352,8 @@ pub enum ModificationDisposition {
     #[cfg_attr(feature = "ts", ts(rename = "unsupported"))]
     Unsupported,
 
-    /// Applied: the durable mutation committed, but convergence on the current
-    /// runtime could not be proved. Dry runs never report it, and the local
-    /// backend need not.
+    /// Durably committed, but not confirmed on the running sandbox. Dry runs
+    /// never report it.
     #[cfg_attr(feature = "ts", ts(rename = "unconfirmed"))]
     Unconfirmed,
 

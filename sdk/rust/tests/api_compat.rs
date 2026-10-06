@@ -93,8 +93,7 @@ fn rust_modify_surface_is_backend_neutral() {
 fn modification_disposition_is_non_exhaustive_downstream() {
     use microsandbox::ModificationDisposition;
 
-    // Downstream crates cannot match exhaustively: the wildcard arm is
-    // required and is what keeps them compiling when a disposition is added.
+    // Downstream matches need a wildcard arm; it keeps them compiling when dispositions are added.
     fn label(disposition: &ModificationDisposition) -> &'static str {
         match disposition {
             ModificationDisposition::Live => "live",

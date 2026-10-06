@@ -496,7 +496,7 @@ struct FfiError {
     operation: Option<IncompleteModification>,
 }
 
-/// Where an unsettled modification stood, so Go callers can resume it.
+/// Resume details for a modification that did not settle within its wait budget.
 #[derive(serde::Serialize)]
 struct IncompleteModification {
     operation_id: String,
@@ -3305,9 +3305,8 @@ pub unsafe extern "C" fn msb_sandbox_handle_modify(
     })
 }
 
-/// Plan or apply a sandbox modification by name, bound to the handle's
-/// captured identity. `expected_id` is that identity; a sandbox that now holds
-/// the name under another identity is refused as replaced.
+/// Plan or apply a sandbox modification by name. A sandbox whose identity is
+/// no longer `expected_id` is refused as replaced.
 /// Input: `{"patch":{...},"policy":"no_restart|next_start|restart","dry_run":bool}`
 /// Output: the serialized `SandboxModificationPlan`.
 #[unsafe(no_mangle)]
@@ -3333,8 +3332,8 @@ pub unsafe extern "C" fn msb_sandbox_handle_modify_identified(
 }
 
 /// Keep waiting for a modification by name that did not settle within its
-/// apply budget. `expected_id` is the handle's captured identity; a sandbox
-/// that now holds the name under another identity is refused as replaced.
+/// wait budget. A sandbox whose identity is no longer `expected_id` is refused
+/// as replaced.
 /// Output: the serialized `SandboxModificationPlan`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_handle_resume_modification(
@@ -3943,7 +3942,7 @@ pub unsafe extern "C" fn msb_sandbox_modify(
 }
 
 /// Keep waiting for a modification on a live sandbox handle that did not
-/// settle within its apply budget.
+/// settle within its wait budget.
 /// Output: the serialized `SandboxModificationPlan`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_resume_modification(

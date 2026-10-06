@@ -310,7 +310,8 @@ func (e *SnapshotSourceRecoveryError) Unwrap() error { return e.err }
 
 // ModificationIncompleteError reports a modification that did not settle
 // within its wait budget and may still commit. Pass OperationID to
-// ResumeModification to keep waiting; IsKind matches ErrModificationIncomplete.
+// ResumeModification to keep waiting.
+// Use errors.As to obtain this type; IsKind also recognizes ErrModificationIncomplete.
 type ModificationIncompleteError struct {
 	OperationID string
 	Budget      time.Duration

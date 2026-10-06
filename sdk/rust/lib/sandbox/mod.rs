@@ -677,8 +677,8 @@ impl Sandbox {
     /// The returned builder owns the canonical SDK patch and dry-run
     /// classification logic. It does not apply changes until later modify
     /// phases wire the same plan model into persistence and runtime control.
-    /// The builder stays bound to this sandbox: if the name now refers to a
-    /// replacement, planning and applying return
+    /// The builder stays bound to this sandbox and never modifies a replacement
+    /// that reused its name; the local backend reports one as
     /// [`MicrosandboxError::SandboxReplaced`](crate::MicrosandboxError::SandboxReplaced).
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone(), self.identity())

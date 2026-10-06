@@ -113,7 +113,7 @@ class SecretChangeKind(StrEnum):
 
 
 class ModificationDisposition(StrEnum):
-    """When or whether a planned change takes effect.
+    """The point at which a planned change takes effect, if any.
 
     Backends may report dispositions added after this release. Those convert to
     a pseudo-member that keeps the raw value; treat unrecognized members as unknown.

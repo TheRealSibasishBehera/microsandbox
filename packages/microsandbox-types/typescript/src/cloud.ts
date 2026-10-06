@@ -689,11 +689,10 @@ export type CloudSecretEntry = {
    */
   source?: CloudSecretSource | null;
   /**
-   * Explicit placeholder the sandbox sees instead of the real value.
+   * Placeholder the sandbox sees instead of the real value.
    *
-   * The field must be present on the wire. SDK builders may materialize a
-   * concrete default before serialization. Validation rejects empty,
-   * oversized, or line-breaking values.
+   * Required on the wire; SDK builders may fill in a default. Validation
+   * rejects empty, oversized, NUL-containing, or line-breaking values.
    */
   placeholder: string;
   /**
@@ -1016,7 +1015,7 @@ export type CloudSecretModificationIntent = {
    */
   name: string;
   /**
-   * Whether the change supplies new secret material.
+   * New secret material: provided when rotating, absent for a metadata-only change.
    */
   material: CloudSecretMaterial;
   /**
@@ -1049,12 +1048,11 @@ export type CloudSecretMaterial = { "kind": "provided" } | { "kind": "absent" };
 
 export type CloudSandboxModificationApplyRequest = {
   /**
-   * Client-generated opaque key. The server binds it to [`intent`], which
-   * carries no secret value: a retry cannot apply twice, and reusing the key
-   * with a different value returns the original operation, so use a new key
-   * for every change. It is distinct from the server-minted operation id.
-   *
-   * [`intent`]: Self::intent
+   * Client-generated key that makes a retried apply safe. The server binds it
+   * to the request's value-free intent, so a retry never applies twice.
+   * Reusing the key with a different secret value returns the original
+   * operation, and reusing it with different settings is refused. Use a new
+   * key for each change. It is distinct from the operation id.
    */
   idempotency_key: string;
   /**
@@ -1106,7 +1104,7 @@ export type CloudSecretValue = string;
 
 export type CloudSandboxModificationOperation = {
   /**
-   * Server-minted operation id, distinct from the caller's idempotency key.
+   * Server-assigned operation id, distinct from the idempotency key.
    */
   id: string;
   /**

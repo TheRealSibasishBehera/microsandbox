@@ -176,11 +176,11 @@ export class StopTimeoutError extends MicrosandboxError {
   }
 }
 
-/** Where an unsettled sandbox modification stood when waiting stopped. */
+/** State of a sandbox modification that did not settle in time. */
 export interface ModificationIncompleteDetails {
   readonly operationId: string;
   readonly budgetMs: number;
-  /** Whether the change was durably committed; `null` when unknown. */
+  /** `true` if the change was durably committed; `null` when unknown. */
   readonly committed: boolean | null;
 }
 

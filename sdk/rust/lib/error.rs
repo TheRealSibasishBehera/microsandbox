@@ -170,21 +170,20 @@ pub enum MicrosandboxError {
         timeout: std::time::Duration,
     },
 
-    /// A sandbox modification did not finish within the caller's budget.
+    /// A sandbox modification did not settle within its wait budget.
     ///
-    /// The operation may still finish; poll `operation_id` for its outcome.
-    /// `committed` says whether the server had established a durable commit,
-    /// when that is known.
+    /// The operation may still commit; pass `operation_id` to
+    /// `resume_modification` to keep waiting.
     #[error(
         "sandbox modification operation {operation_id:?} did not finish within {budget:?}; {}",
         modification_commit_state(*.committed)
     )]
     ModificationIncomplete {
-        /// Server-minted id of the modification operation.
+        /// Server-assigned id of the modification operation.
         operation_id: String,
-        /// Time budget the caller allowed, now spent.
+        /// Wait budget that elapsed.
         budget: std::time::Duration,
-        /// Whether the server had established a durable commit, when known.
+        /// The server's durable-commit state, when known.
         committed: Option<bool>,
     },
 

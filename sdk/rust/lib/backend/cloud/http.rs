@@ -62,7 +62,7 @@ enum CloudSseItem {
     Ignore,
 }
 
-/// Answer of the modification apply route.
+/// Response from `POST /v1/sandboxes/:id/modifications`.
 pub(in crate::backend) enum CloudModificationApplyResponse {
     /// `200`: the modification settled within the request.
     Settled(SandboxModificationPlan),

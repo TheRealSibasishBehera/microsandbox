@@ -269,8 +269,7 @@ mod tests {
 
     #[test]
     fn checkpoint_reply_preserves_success_without_requesting_another_resume() {
-        // The runtime alone restores the prior execution state. This also covers its successful
-        // capture of an intentionally paused source; the SDK must not initiate another resume.
+        // The runtime restores the prior state, even a paused source; the SDK must not resume it.
         let outcome = checkpoint_response(checkpoint_reply(true)).unwrap();
         assert!(outcome.recovery_error.is_none());
     }

@@ -645,7 +645,7 @@ Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
-A backend that applies modifications as asynchronous operations may report a change `"unconfirmed"` when it was saved but the running sandbox did not confirm it. If the operation does not settle within the backend's budget, `modify()` rejects with `ModificationIncompleteError` carrying `operationId`, `budgetMs`, and `committed` (`null` when unknown); the change may still commit. Pass `operationId` to [`resumeModification()`](#sandbox-resumemodification) to keep waiting.
+On microsandbox cloud, an applied plan may report a change `"unconfirmed"`: saved but not confirmed on the running sandbox; it takes effect by the next start at the latest. If the change does not settle within the wait budget, `modify()` rejects with `ModificationIncompleteError` carrying `operationId`, `budgetMs`, and `committed` (`null` when unknown); the change may still commit. Pass `operationId` to [`resumeModification()`](#sandbox-resumemodification) to keep waiting.
 
 <p className="msb-label">Parameters</p>
 
@@ -687,7 +687,7 @@ try {
 
 </Accordion>
 
-Keep waiting for a modification that rejected with `ModificationIncompleteError`. The operation is checked against this sandbox, and waiting uses the backend's settle budget again: the result is the settled plan, the operation's failure, or another `ModificationIncompleteError`. The local backend applies modifications synchronously and rejects with `UnsupportedError`.
+Keep waiting for a modification that rejected with `ModificationIncompleteError`. The operation must belong to this sandbox. Each call waits up to the full wait budget again and returns the settled plan, the operation's failure, or another `ModificationIncompleteError`. The local backend rejects with `UnsupportedError`.
 
 <p className="msb-label">Parameters</p>
 
@@ -2521,7 +2521,7 @@ Plan or apply a configuration change; same options as [`modify()`](#sandbox-modi
 resumeModification(operationId)
 ```
 
-Keep waiting for an unfinished modification by its `ModificationIncompleteError.operationId`; see [`resumeModification()`](#sandbox-resumemodification)
+Keep waiting for a modification that did not settle, using its `ModificationIncompleteError.operationId`; see [`resumeModification()`](#sandbox-resumemodification)
 
 <p className="msb-label">Returns</p>
 

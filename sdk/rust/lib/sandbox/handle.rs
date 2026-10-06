@@ -318,8 +318,8 @@ impl SandboxHandle {
     /// The builder fetches a fresh handle during [`dry_run`](SandboxModificationBuilder::dry_run)
     /// so planning uses current status and persisted config rather than this
     /// handle's possibly stale snapshot. The builder stays bound to this
-    /// sandbox: if the name now refers to a replacement, planning and applying
-    /// return [`MicrosandboxError::SandboxReplaced`].
+    /// sandbox and never modifies a replacement that reused its name; the local
+    /// backend reports one as [`MicrosandboxError::SandboxReplaced`].
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone(), self.identity())
     }

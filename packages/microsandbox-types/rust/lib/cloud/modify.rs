@@ -1,9 +1,8 @@
 //! Cloud sandbox-modification wire contracts.
 //!
-//! Stage 1 supports exactly one change to one existing secret per request, so
-//! the request carries a single `secret` rather than a list; a later stage can
-//! add a list beside it additively. Plan requests are value-free. Only the
-//! apply request carries plaintext, inside [`CloudSecretValue`].
+//! A request changes exactly one existing secret, so it carries a single
+//! `secret` field. Plan requests are value-free; only the apply request
+//! carries plaintext, inside [`CloudSecretValue`].
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -28,7 +27,7 @@ pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
 // Types: Requests
 //--------------------------------------------------------------------------------------------------
 
-/// Body of a Cloud modification dry run. It is value-free by construction.
+/// Request body for a Cloud modification dry run. It never carries a secret value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -43,8 +42,7 @@ pub struct CloudSandboxModificationPlanRequest {
 
 /// A value-free change to one existing secret.
 ///
-/// Every `None` metadata field means "omitted: preserve the current setting",
-/// and is left out of the JSON.
+/// A `None` field keeps the current setting and is omitted from the JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -52,7 +50,7 @@ pub struct CloudSandboxModificationPlanRequest {
 pub struct CloudSecretModificationIntent {
     /// Name of the existing secret, the env var it is exposed as.
     pub name: String,
-    /// Whether the change supplies new secret material.
+    /// New secret material: provided when rotating, absent for a metadata-only change.
     pub material: CloudSecretMaterial,
     /// New guest-visible placeholder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,8 +72,8 @@ pub struct CloudSecretModificationIntent {
     pub require_tls_identity: Option<bool>,
 }
 
-/// Whether a secret change supplies new material. Carries nothing derived
-/// from the value: no hash, length, or source name.
+/// Presence of new secret material in a change. It carries nothing derived
+/// from the value, such as a hash, length, or source name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -95,12 +93,11 @@ pub enum CloudSecretMaterial {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct CloudSandboxModificationApplyRequest {
-    /// Client-generated opaque key. The server binds it to [`intent`], which
-    /// carries no secret value: a retry cannot apply twice, and reusing the key
-    /// with a different value returns the original operation, so use a new key
-    /// for every change. It is distinct from the server-minted operation id.
-    ///
-    /// [`intent`]: Self::intent
+    /// Client-generated key that makes a retried apply safe. The server binds it
+    /// to the request's value-free intent, so a retry never applies twice.
+    /// Reusing the key with a different secret value returns the original
+    /// operation, and reusing it with different settings is refused. Use a new
+    /// key for each change. It is distinct from the operation id.
     pub idempotency_key: String,
     /// Policy the change is applied under.
     #[serde(default)]
@@ -111,8 +108,7 @@ pub struct CloudSandboxModificationApplyRequest {
 
 /// A change to one existing secret, with its new value when rotating.
 ///
-/// Every `None` field means "omitted: preserve the current setting", and is
-/// left out of the JSON.
+/// A `None` field keeps the current setting and is omitted from the JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -145,9 +141,8 @@ pub struct CloudSecretModificationApply {
 
 /// Secret plaintext carried by an apply request.
 ///
-/// Zeroized on drop and printed as `[REDACTED]` by `Debug`. It serializes as a
-/// plain string only because the apply body must carry it, and it has no
-/// `Display`.
+/// Zeroized on drop, redacted by `Debug`, and without `Display`. Serializes as
+/// a plain string because the apply body carries it.
 #[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "utoipa", schema(value_type = String))]
@@ -158,12 +153,12 @@ pub struct CloudSecretValue(#[cfg_attr(feature = "ts", ts(type = "string"))] Zer
 // Types: Operation
 //--------------------------------------------------------------------------------------------------
 
-/// The modification operation envelope. It is value-free.
+/// A Cloud modification operation. It is value-free.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudSandboxModificationOperation {
-    /// Server-minted operation id, distinct from the caller's idempotency key.
+    /// Server-assigned operation id, distinct from the idempotency key.
     pub id: String,
     /// Current operation status.
     pub status: CloudModificationOperationStatus,
@@ -175,7 +170,7 @@ pub struct CloudSandboxModificationOperation {
     pub error: Option<CloudErrorDetails>,
 }
 
-/// Whether a modification operation has finished.
+/// Progress of a modification operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -194,7 +189,7 @@ pub enum CloudModificationOperationStatus {
 // Types: Rejection
 //--------------------------------------------------------------------------------------------------
 
-/// Why a modification cannot be expressed as a Stage 1 Cloud request.
+/// Reason a modification patch cannot be sent as a Cloud request.
 ///
 /// Each variant names the offending field so nothing is dropped silently.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -286,12 +281,12 @@ pub enum CloudModificationRejection {
     InvalidIdempotencyKey {
         /// Offending field.
         field: &'static str,
-        /// What is wrong with the key.
+        /// Reason the key was rejected.
         reason: CloudIdempotencyKeyError,
     },
 }
 
-/// Why an idempotency key is refused. Beyond these rules the key is opaque.
+/// Reason an idempotency key is refused. Beyond these rules the key is opaque.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum CloudIdempotencyKeyError {
@@ -318,10 +313,10 @@ pub enum CloudIdempotencyKeyError {
 //--------------------------------------------------------------------------------------------------
 
 impl CloudSandboxModificationPlanRequest {
-    /// Project a neutral patch onto the value-free dry-run request.
+    /// Build the dry-run request from a patch.
     ///
-    /// Inline value and `Env` source both become [`CloudSecretMaterial::Provided`],
-    /// without reading either. Host strings parse as they do for create.
+    /// An inline value or `Env` source becomes [`CloudSecretMaterial::Provided`]
+    /// without being read. Host strings parse as they do for create.
     pub fn from_patch(
         patch: &SandboxModificationPatch,
         policy: ModificationPolicy,
@@ -339,9 +334,8 @@ impl CloudSandboxModificationPlanRequest {
         })
     }
 
-    /// Check a deserialized request with the name and placeholder rules the
-    /// dry-run projection applies. Host patterns are accepted as create
-    /// accepts them.
+    /// Check a deserialized request with the name and placeholder rules of
+    /// [`Self::from_patch`]. Host patterns are accepted as create accepts them.
     pub fn validate(&self) -> Result<(), CloudModificationRejection> {
         check_name("secret.name", &self.secret.name)?;
         check_placeholder("secret.placeholder", self.secret.placeholder.as_deref())
@@ -349,12 +343,12 @@ impl CloudSandboxModificationPlanRequest {
 }
 
 impl CloudSandboxModificationApplyRequest {
-    /// Project a neutral patch onto the apply request.
+    /// Build the apply request from a patch.
     ///
-    /// An inline value is carried as is. An `Env` source is handed to
-    /// `resolve_env`, so the caller resolves it and this crate never reads the
-    /// environment. Refuses the same patches as the dry-run projection, plus a
-    /// blank or unresolved value and an invalid idempotency key.
+    /// An inline value is carried as is. An `Env` source is resolved by
+    /// `resolve_env`, so this crate never reads the environment. Refuses what
+    /// [`CloudSandboxModificationPlanRequest::from_patch`] refuses, plus a blank
+    /// or unresolved value and an invalid idempotency key.
     pub fn from_patch(
         patch: &SandboxModificationPatch,
         policy: ModificationPolicy,
@@ -390,7 +384,8 @@ impl CloudSandboxModificationApplyRequest {
     }
 
     /// The value-free request this apply performs, which the server binds the
-    /// idempotency key to. Equal to the dry-run projection of the same patch.
+    /// idempotency key to. Equals [`CloudSandboxModificationPlanRequest::from_patch`]
+    /// on the same patch.
     pub fn intent(&self) -> CloudSandboxModificationPlanRequest {
         let secret = &self.secret;
         CloudSandboxModificationPlanRequest {
@@ -413,8 +408,8 @@ impl CloudSandboxModificationApplyRequest {
     }
 
     /// Check a deserialized request with the idempotency key, name,
-    /// placeholder and value rules the apply projection applies. Host patterns
-    /// are accepted as create accepts them.
+    /// placeholder, and value rules of [`Self::from_patch`]. Host patterns are
+    /// accepted as create accepts them.
     pub fn validate(&self) -> Result<(), CloudModificationRejection> {
         let secret = &self.secret;
         check_idempotency_key(&self.idempotency_key)?;
@@ -515,9 +510,8 @@ impl SecretMetadata {
     }
 }
 
-/// Refuse everything Stage 1 cannot express, then project the one secret's
-/// metadata. Material is left to the caller, which differs for dry run and
-/// apply.
+/// Refuse any patch a Cloud request cannot express, then extract the secret's
+/// metadata. The caller handles material, which differs for dry run and apply.
 fn project_secret(
     patch: &SandboxModificationPatch,
 ) -> Result<(&SecretModificationPatch, SecretMetadata), CloudModificationRejection> {
@@ -747,7 +741,7 @@ mod tests {
         )
     }
 
-    /// Both projections must refuse the same patch the same way.
+    /// Dry run and apply must refuse the same patch the same way.
     fn rejection(patch: &SandboxModificationPatch) -> CloudModificationRejection {
         let planned =
             CloudSandboxModificationPlanRequest::from_patch(patch, ModificationPolicy::NoRestart)

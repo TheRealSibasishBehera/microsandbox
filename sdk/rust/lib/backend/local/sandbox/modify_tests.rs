@@ -122,7 +122,7 @@ async fn identity_test_backend(home: &std::path::Path) -> Arc<dyn Backend> {
     )
 }
 
-/// Insert a stopped row for `config` with its label projection.
+/// Insert a stopped row and its labels for `config`.
 async fn insert_stopped_row(backend: &Arc<dyn Backend>, config: &SandboxConfig) -> i32 {
     let pools = backend.as_local().unwrap().db().await.unwrap();
     let id = sandbox_entity::ActiveModel {
@@ -2169,8 +2169,7 @@ fn stopped_secret_changes_are_next_start_and_apply_supported() {
     assert!(validate_apply_supported(&plan).is_ok());
 }
 
-/// Cloud dry runs carry no value, so a plan must depend only on whether material
-/// is present, and must never contain it.
+/// A plan must neither vary with nor contain the secret value (cloud dry runs never send it).
 #[cfg(feature = "net")]
 #[tokio::test]
 async fn value_only_rotation_plans_the_same_for_any_value() {
@@ -2940,9 +2939,8 @@ fn value_bearing_patch_never_leaks_into_plans_debug_or_live_request_debug() {
     assert!(!message.contains(VALUE_SENTINEL));
 }
 
-/// A rotation that also narrows allowed hosts must travel as ONE
-/// `SecretsUpdate`: split in two, the value can land while the host
-/// restriction fails, leaving fresh material under a stale allow-list.
+/// A rotation with new allowed hosts must be one `SecretsUpdate`; split, the value
+/// could land under a stale allow-list.
 #[cfg(feature = "net")]
 #[test]
 fn a_rotation_with_new_hosts_travels_as_one_batch() {

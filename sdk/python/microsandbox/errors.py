@@ -161,11 +161,10 @@ class SnapshotMigrationError(MicrosandboxError):
 
 
 class ModificationIncompleteError(MicrosandboxError, TimeoutError):
-    """A sandbox modification did not settle within its wait budget.
+    """A sandbox modification did not settle within its wait budget and may still commit.
 
-    The operation may still commit. Pass ``operation_id`` to
-    ``resume_modification()`` to keep waiting for its outcome. ``committed``
-    is ``None`` when durable commit is unknown.
+    Pass ``operation_id`` to ``resume_modification()`` to keep waiting. ``budget``
+    is in seconds; ``committed`` is ``None`` when unknown.
     """
 
     code = "modification-incomplete"
