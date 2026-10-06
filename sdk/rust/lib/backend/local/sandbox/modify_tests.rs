@@ -1642,6 +1642,7 @@ fn secret_policy_specs() -> Vec<SecretModificationPatch> {
         SecretModificationPatch {
             substitution: Some(SecretSubstitution {
                 headers: false,
+                header_fields: Vec::new(),
                 query: true,
                 body: true,
             }),
@@ -1657,6 +1658,13 @@ fn secret_policy_specs() -> Vec<SecretModificationPatch> {
         },
         SecretModificationPatch {
             passthrough_hosts: vec!["logs.example.com".into()],
+            ..bare_spec("API_KEY", &[])
+        },
+        SecretModificationPatch {
+            substitution: Some(SecretSubstitution {
+                header_fields: vec!["authorization".into(), "x-api-key".into()],
+                ..SecretSubstitution::default()
+            }),
             ..bare_spec("API_KEY", &[])
         },
     ]
@@ -1904,6 +1912,10 @@ async fn applying_stopped_secret_policy_edits_persists_each_option() {
                     .map(format_host_pattern)
                     .collect::<Vec<_>>(),
                 vec!["logs.example.com"]
+            ),
+            4 => assert_eq!(
+                entry.substitution.header_fields,
+                vec!["authorization", "x-api-key"]
             ),
             _ => unreachable!(),
         }

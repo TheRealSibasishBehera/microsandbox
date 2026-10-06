@@ -1608,6 +1608,7 @@ fn secret_policy_changes(
     };
     spec.substitution.as_ref().is_some_and(|substitution| {
         substitution.headers != existing.substitution.headers
+            || substitution.header_fields != existing.substitution.header_fields
             || substitution.query != existing.substitution.query
             || substitution.body != existing.substitution.body
     }) || (!spec.passthrough_hosts.is_empty()

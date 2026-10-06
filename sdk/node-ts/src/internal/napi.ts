@@ -1086,6 +1086,7 @@ export interface NapiSecretBuilder {
   allowPassthroughFor(host: string): this;
   requireTlsIdentity(enabled: boolean): this;
   substituteInHeaders(enabled: boolean): this;
+  substituteInHeaderFields(fields: string[]): this;
   substituteInQuery(enabled: boolean): this;
   substituteInBody(enabled: boolean): this;
   violationAction(action: string): this;
@@ -1107,6 +1108,7 @@ export interface NapiSecretEntry {
 
 export interface NapiSecretSubstitution {
   readonly headers: boolean;
+  readonly headerFields: string[];
   readonly query: boolean;
   readonly body: boolean;
 }

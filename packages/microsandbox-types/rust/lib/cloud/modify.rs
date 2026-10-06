@@ -705,6 +705,7 @@ mod tests {
             ],
             substitution: Some(SecretSubstitution {
                 headers: true,
+                header_fields: Vec::new(),
                 query: true,
                 body: false,
             }),
