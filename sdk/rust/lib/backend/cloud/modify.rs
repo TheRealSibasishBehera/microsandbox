@@ -271,12 +271,6 @@ fn resolve_env(var: &str) -> Option<CloudSecretValue> {
 /// Changes the cloud backend does not support map to [`MicrosandboxError::Unsupported`];
 /// malformed patches map to [`MicrosandboxError::InvalidConfig`].
 fn rejection_error(rejection: CloudModificationRejection) -> MicrosandboxError {
-    let not_available = |rejection: CloudModificationRejection| {
-        MicrosandboxError::unsupported(
-            Operation::SandboxModify,
-            UnsupportedReason::NotAvailable(rejection.to_string()),
-        )
-    };
     match rejection {
         CloudModificationRejection::UnsupportedField { field } => MicrosandboxError::unsupported(
             Operation::SandboxModify,
@@ -285,7 +279,10 @@ fn rejection_error(rejection: CloudModificationRejection) -> MicrosandboxError {
         CloudModificationRejection::NoSecretChange { .. }
         | CloudModificationRejection::MultipleSecrets { .. }
         | CloudModificationRejection::SecretRemoval { .. }
-        | CloudModificationRejection::StoreSource { .. } => not_available(rejection),
+        | CloudModificationRejection::StoreSource { .. } => MicrosandboxError::unsupported(
+            Operation::SandboxModify,
+            UnsupportedReason::NotAvailable(rejection.to_string()),
+        ),
         CloudModificationRejection::BlankName { .. }
         | CloudModificationRejection::InvalidName { .. }
         | CloudModificationRejection::BlankValue { .. }
@@ -371,6 +368,10 @@ mod tests {
         fn requests(&self) -> Vec<Recorded> {
             self.requests.lock().unwrap().clone()
         }
+
+        fn lines(&self) -> Vec<String> {
+            self.requests().into_iter().map(|r| r.line).collect()
+        }
     }
 
     async fn read_request(reader: &mut BufReader<TcpStream>) -> Recorded {
@@ -434,6 +435,10 @@ mod tests {
 
     fn body(request: &Recorded) -> serde_json::Value {
         serde_json::from_str(&request.body).unwrap()
+    }
+
+    fn plan_line() -> String {
+        format!("POST /v1/sandboxes/{SANDBOX_ID}/modifications/plan HTTP/1.1")
     }
 
     fn apply_line() -> String {
@@ -660,12 +665,9 @@ mod tests {
 
             assert_eq!(serde_json::to_value(&plan).unwrap(), plan_json("live"));
             assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].line, plan_line());
             assert_eq!(
-                requests[0].line,
-                format!("POST /v1/sandboxes/{SANDBOX_ID}/modifications/plan HTTP/1.1")
-            );
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&requests[0].body).unwrap(),
+                body(&requests[0]),
                 json!({
                     "policy": "no_restart",
                     "secret": {"name": "API_KEY", "material": {"kind": "provided"}},
@@ -732,13 +734,7 @@ mod tests {
             matches!(error, MicrosandboxError::SandboxNotFound(_)),
             "{error:?}"
         );
-        let lines: Vec<_> = mock.requests().into_iter().map(|r| r.line).collect();
-        assert_eq!(
-            lines,
-            [format!(
-                "POST /v1/sandboxes/{SANDBOX_ID}/modifications/plan HTTP/1.1"
-            )]
-        );
+        assert_eq!(mock.lines(), [plan_line()]);
     }
 
     #[tokio::test]
@@ -799,8 +795,11 @@ mod tests {
         );
         assert_eq!(body["policy"], "no_restart");
         let key = body["idempotency_key"].as_str().unwrap();
-        assert_eq!(key.len(), 36);
-        assert_eq!(&key[14..15], "4", "version 4 UUID: {key}");
+        assert_eq!(
+            uuid::Uuid::parse_str(key).unwrap().get_version_num(),
+            4,
+            "version 4 UUID: {key}"
+        );
     }
 
     #[test]
@@ -871,8 +870,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(serde_json::to_value(&plan).unwrap(), plan_json(disposition));
-            let lines: Vec<_> = mock.requests().into_iter().map(|r| r.line).collect();
-            assert_eq!(lines, [apply_line(), poll_line(), poll_line()]);
+            assert_eq!(mock.lines(), [apply_line(), poll_line(), poll_line()]);
         }
     }
 
@@ -1046,8 +1044,7 @@ mod tests {
             matches!(error, MicrosandboxError::SandboxNotFound(_)),
             "{error:?}"
         );
-        let lines: Vec<_> = mock.requests().into_iter().map(|r| r.line).collect();
-        assert_eq!(lines, [apply_line()]);
+        assert_eq!(mock.lines(), [apply_line()]);
     }
 
     #[test]
@@ -1080,8 +1077,7 @@ mod tests {
             serde_json::to_value(&plan).unwrap(),
             plan_json("unconfirmed")
         );
-        let lines: Vec<_> = mock.requests().into_iter().map(|r| r.line).collect();
-        assert_eq!(lines, [poll_line()], "the first poll is immediate");
+        assert_eq!(mock.lines(), [poll_line()], "the first poll is immediate");
     }
 
     #[tokio::test]
@@ -1123,8 +1119,7 @@ mod tests {
             ),
             "{error:?}"
         );
-        let lines: Vec<_> = mock.requests().into_iter().map(|r| r.line).collect();
-        assert_eq!(lines, [poll_line(), poll_line()]);
+        assert_eq!(mock.lines(), [poll_line(), poll_line()]);
     }
 
     #[tokio::test]

@@ -461,10 +461,10 @@ async fn grow_root_disk_now(
     let _transition =
         LocalBackend::acquire_sandbox_transition_guard(&local_backend.config().run_dir(), name)
             .await?;
-    match current_sandbox_id(backend, name).await? {
-        Some(actual) => super::ensure_local_identity(name, Some(expected_id), actual)?,
-        None => return Err(crate::MicrosandboxError::SandboxNotFound(name.to_string())),
-    }
+    let Some(actual) = current_sandbox_id(backend, name).await? else {
+        return Err(crate::MicrosandboxError::SandboxNotFound(name.to_string()));
+    };
+    super::ensure_local_identity(name, Some(expected_id), actual)?;
     let sandbox_dir = local_backend.sandboxes_dir().join(name);
     let runtime_dir = sandbox_dir.join("runtime");
     let handled = tokio::task::spawn_blocking(move || {

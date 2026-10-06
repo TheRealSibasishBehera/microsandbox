@@ -2982,7 +2982,7 @@ fn a_rotation_with_new_hosts_travels_as_one_batch() {
     assert!(matches!(
         &updates[1],
         microsandbox_runtime::control::SecretLiveChange::SetAllowedHosts { name, hosts }
-            if name == "API_KEY" && hosts == &vec!["api.example.com".to_string()]
+            if name == "API_KEY" && *hosts == ["api.example.com"]
     ));
 }
 

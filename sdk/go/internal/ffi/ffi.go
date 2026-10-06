@@ -2682,7 +2682,7 @@ func ModifySandboxHandle(ctx context.Context, name, expectedID, optsJSON string)
 	}
 	// The name-only symbol would modify whichever sandbox holds the name now.
 	if !bool(C.has_identified_handle_modify()) {
-		return "", errIdentifiedHandleModifyUnavailable
+		return "", &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support modifying a sandbox handle by identity; update the native SDK"}
 	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
@@ -2694,8 +2694,6 @@ func ModifySandboxHandle(ctx context.Context, name, expectedID, optsJSON string)
 		return C.call_msb_sandbox_handle_modify_identified(cancelID, cName, cExpectedID, cOpts, buf, bufLen)
 	})
 }
-
-var errIdentifiedHandleModifyUnavailable = &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support modifying a sandbox handle by identity; update the native SDK"}
 
 // ResumeModificationByName keeps waiting for an unsettled modification by
 // sandbox name, refusing a sandbox whose identity is no longer expectedID.

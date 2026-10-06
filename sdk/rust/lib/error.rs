@@ -845,18 +845,6 @@ mod tests {
             error(None).to_string(),
             "sandbox modification operation \"op-1\" did not finish within 30s; whether the change committed is unknown"
         );
-
-        let MicrosandboxError::ModificationIncomplete {
-            operation_id,
-            budget,
-            committed,
-        } = error(Some(true))
-        else {
-            unreachable!("constructed as ModificationIncomplete");
-        };
-        assert_eq!(operation_id, "op-1");
-        assert_eq!(budget, std::time::Duration::from_secs(30));
-        assert_eq!(committed, Some(true));
     }
 
     #[test]

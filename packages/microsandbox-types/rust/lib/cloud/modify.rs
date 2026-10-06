@@ -751,8 +751,7 @@ mod tests {
         planned
     }
 
-    fn full_secret_json(material_or_value: (&str, Value)) -> Value {
-        let (key, value) = material_or_value;
+    fn full_secret_json(key: &str, value: Value) -> Value {
         let mut secret = json!({
             "name": "API_KEY",
             "placeholder": "$API_KEY",
@@ -789,7 +788,7 @@ mod tests {
             round_trips(&request),
             json!({
                 "policy": "next_start",
-                "secret": full_secret_json(("material", json!({"kind": "provided"}))),
+                "secret": full_secret_json("material", json!({"kind": "provided"})),
             })
         );
     }
@@ -803,7 +802,7 @@ mod tests {
             json!({
                 "idempotency_key": "idem-1",
                 "policy": "next_start",
-                "secret": full_secret_json(("value", json!(MATERIAL))),
+                "secret": full_secret_json("value", json!(MATERIAL)),
             })
         );
     }
