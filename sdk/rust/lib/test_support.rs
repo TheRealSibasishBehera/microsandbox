@@ -66,6 +66,16 @@ pub(crate) fn local_backend_builder(
 /// Seed a running row whose live run is owned by this test process.
 #[cfg(feature = "local")]
 pub(crate) async fn seed_control_run(local: &crate::LocalBackend, name: &str) {
+    seed_control_run_with_status(local, name, crate::sandbox::SandboxStatus::Running).await;
+}
+
+/// Seed a row in `status` whose live run is owned by this test process.
+#[cfg(feature = "local")]
+pub(crate) async fn seed_control_run_with_status(
+    local: &crate::LocalBackend,
+    name: &str,
+    status: crate::sandbox::SandboxStatus,
+) {
     use crate::db::entity::{run, sandbox};
     use sea_orm::{EntityTrait, Set};
 
@@ -73,7 +83,7 @@ pub(crate) async fn seed_control_run(local: &crate::LocalBackend, name: &str) {
     let sandbox_id = sandbox::Entity::insert(sandbox::ActiveModel {
         name: Set(name.into()),
         config: Set("{}".into()),
-        status: Set(crate::sandbox::SandboxStatus::Running),
+        status: Set(status),
         ephemeral: Set(false),
         ..Default::default()
     })

@@ -28,6 +28,10 @@ pub(crate) mod metrics;
 mod modify;
 #[cfg(feature = "local")]
 mod patch;
+#[cfg(all(feature = "local", windows))]
+pub(crate) use patch::{
+    windows_mark_delete, windows_open_relative_for_removal, windows_remove_open_entry,
+};
 #[cfg(feature = "local")]
 pub(crate) mod pause;
 #[cfg(all(feature = "local", windows))]
@@ -111,7 +115,9 @@ pub(crate) fn reserved_label_prefix(key: &str) -> Option<&'static str> {
 // `mod patch` and `mod types` are private; re-export the entry points the
 // local backend's lifecycle and create methods under `backend/local/` call.
 #[cfg(feature = "local")]
-pub(crate) use builder::{apply_checkpoint_restore_constraints, apply_snapshot_root_layout};
+pub(crate) use builder::{
+    apply_checkpoint_restore_constraints, apply_snapshot_guest_clock, apply_snapshot_root_layout,
+};
 #[cfg(feature = "local")]
 pub(crate) use patch::{apply_patches, build_flat_tree, build_upper_tree};
 #[cfg(all(feature = "local", windows))]
@@ -174,11 +180,11 @@ pub use microsandbox_types::{
     TlsConfigPatch,
 };
 pub use microsandbox_types::{
-    EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, NetworkSpecPatch,
-    PortProtocol, PublishedPortSpec, SandboxLogLevel, SandboxPolicyPatch, SandboxResources,
-    SandboxResourcesPatch, SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec,
-    SandboxSpecPatch, TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
-    VsockSpecPatch,
+    EnvVar, GuestClockPolicy, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec,
+    NetworkSpecPatch, PortProtocol, PublishedPortSpec, SandboxLogLevel, SandboxPolicyPatch,
+    SandboxResources, SandboxResourcesPatch, SandboxRuntimeOptions, SandboxRuntimeOptionsPatch,
+    SandboxSpec, SandboxSpecPatch, TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType,
+    VsockSpec, VsockSpecPatch,
 };
 pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
 #[cfg(feature = "local")]
@@ -381,18 +387,25 @@ impl Sandbox {
 
     #[cfg(feature = "local")]
     fn create_with_pull_progress_and_mode(
-        config: SandboxConfig,
+        mut config: SandboxConfig,
         requested_mode: SpawnMode,
     ) -> (
         PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
+        let backend = crate::backend::default_backend();
+        // Resolve before spawning: the task may first run after the caller changes cwd.
+        let paths = if backend.as_local().is_some() {
+            crate::backend::local::host_paths::resolve_host_paths(&mut config)
+        } else {
+            Ok(())
+        };
         let (handle, sender) = progress_channel();
         let task = tokio::spawn(async move {
+            paths?;
             let mode = create_spawn_mode(&config, requested_mode);
             // Pull progress is local-only; ignore the channel on non-local
             // backends and dispatch through the trait without progress events.
-            let backend = crate::backend::default_backend();
             match backend.kind() {
                 crate::backend::BackendKind::Local => {
                     let local = backend.as_local().ok_or_else(|| {
@@ -1752,7 +1765,7 @@ pub(super) async fn remove_local_persisted_sandbox(
     }
     if !matches!(
         current.status,
-        SandboxStatus::Stopped | SandboxStatus::Crashed
+        SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
     ) {
         return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
             "cannot remove sandbox {name:?}: status is {:?}",
@@ -1796,7 +1809,7 @@ pub(super) async fn remove_local_persisted_sandbox(
     }
     if !matches!(
         current.status,
-        SandboxStatus::Stopped | SandboxStatus::Crashed
+        SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
     ) {
         return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
             "cannot remove sandbox {name:?}: status changed to {:?}",
@@ -2123,6 +2136,41 @@ mod tests {
             crate::MicrosandboxError::SandboxReplaced { .. }
         ));
         assert!(sandbox_dir.join("marker").exists());
+    }
+
+    #[tokio::test]
+    async fn persisted_removal_removes_a_sandbox_that_never_started() {
+        let temp = tempdir().unwrap();
+        let backend = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let pools = backend.db().await.unwrap();
+        let created = super::sandbox_entity::ActiveModel {
+            name: Set("never-started".to_string()),
+            config: Set("{}".to_string()),
+            status: Set(SandboxStatus::Created),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let sandbox_dir = backend.sandboxes_dir().join("never-started");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+
+        remove_local_persisted_sandbox(&backend, "never-started", created.id)
+            .await
+            .unwrap();
+
+        assert!(!sandbox_dir.exists());
+        assert!(matches!(
+            remove_local_persisted_sandbox(&backend, "never-started", created.id).await,
+            Err(crate::MicrosandboxError::SandboxNotFound(_))
+        ));
     }
 
     #[cfg(unix)]

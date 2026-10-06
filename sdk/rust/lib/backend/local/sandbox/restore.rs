@@ -18,7 +18,10 @@ pub(super) async fn restore_requested_resources(
     let resources = &config.spec.resources;
     let session =
         if resources.max_cpus > resources.cpus || resources.max_memory_mib > resources.memory_mib {
-            local.control_session(&config.spec.name).await?
+            // The restored sandbox is still `Starting` here: readiness is published after this.
+            local
+                .control_session_while_starting(&config.spec.name)
+                .await?
         } else {
             None
         };
@@ -100,6 +103,74 @@ mod tests {
             assert_eq!(config.spec.resources.cpus, cpus);
             assert_eq!(config.spec.resources.memory_mib, 256);
         }
+    }
+
+    /// A checkpoint restore reads the restored CPU target before the creator publishes the
+    /// sandbox as `Running`; ordinary control sessions still refuse a sandbox that is `Starting`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restored_cpu_target_is_read_while_the_sandbox_is_still_starting() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        crate::test_support::seed_control_run_with_status(
+            &local,
+            "api",
+            crate::sandbox::SandboxStatus::Starting,
+        )
+        .await;
+        let agent =
+            crate::runtime::sandbox_agent_socket_path_candidates_for(&local, "api").remove(0);
+        let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        // An ordinary session does not own a sandbox that has not been published yet.
+        assert!(matches!(
+            local.control_session("api").await,
+            Err(crate::MicrosandboxError::ControlClient(error))
+                if matches!(&*error, microsandbox_control_client::ControlClientError::RuntimeChanged)
+        ));
+        let server = tokio::spawn(async move {
+            for (op, reply) in [
+                (
+                    "capabilities",
+                    "{\"ok\":true,\"capabilities\":{\"cpu_resize\":true,\"memory_resize\":true,\"secrets_update\":false}}",
+                ),
+                (
+                    "cpu_state",
+                    "{\"ok\":true,\"cpu\":{\"possible\":4,\"requested_online\":2,\"actual_online\":2,\"enforced\":2}}",
+                ),
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+                    op
+                );
+                stream
+                    .get_mut()
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut config = config(1, 256);
+        config.spec.resources.max_cpus = 4;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            restore_requested_resources(&local, &mut config),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.spec.resources.cpus, 2);
+        server.await.unwrap();
     }
 
     #[cfg(unix)]

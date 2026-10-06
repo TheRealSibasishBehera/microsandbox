@@ -36,8 +36,11 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod creation_progress;
+mod exec_adapter;
 mod restore;
 mod setup;
+mod storage;
+mod volume_fs;
 
 use std::{
     collections::HashMap,
@@ -65,7 +68,7 @@ use microsandbox::{
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
     snapshot::{SaveOpts, SnapshotFormat, SnapshotScope},
-    volume::{Volume, VolumeBuilder, VolumeFs, VolumeHandle, VolumeKind},
+    volume::{Volume, VolumeBuilder, VolumeHandle, VolumeKind},
 };
 use microsandbox_network::secrets::config::SecretViolationAction;
 use tokio::io::AsyncWriteExt;
@@ -489,6 +492,7 @@ struct FfiError {
     kind: &'static str,
     message: String,
     recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
+    os_error: Option<i32>,
     operation: Option<IncompleteModification>,
 }
 
@@ -514,6 +518,7 @@ impl FfiError {
             kind,
             message: message.into(),
             recovery: None,
+            os_error: None,
             operation: None,
         }
     }
@@ -537,6 +542,12 @@ impl FfiError {
     fn to_json(&self) -> String {
         // Message is escaped via serde_json so it's safe to embed arbitrary text.
         let msg = serde_json::to_string(&self.message).unwrap_or_else(|_| "\"\"".into());
+        if let Some(os_error) = self.os_error {
+            return format!(
+                r#"{{"kind":"{}","message":{},"os_error":{}}}"#,
+                self.kind, msg, os_error
+            );
+        }
         if let Some(recovery) = &self.recovery
             && let Ok(recovery) = serde_json::to_string(recovery)
         {
@@ -607,6 +618,7 @@ impl From<MicrosandboxError> for FfiError {
         Self {
             kind,
             message: e.to_string(),
+            os_error: None,
             recovery: match e {
                 MicrosandboxError::SnapshotSourceRecovery(recovery) => Some(recovery),
                 _ => None,
@@ -2583,6 +2595,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     )));
                 }
                 builder = match proxy.protocol.as_str() {
+                    "http_connect" => builder.proxy(move |p| p.http_connect(proxy.address)),
                     "socks4" => builder.proxy(move |p| {
                         let proxy_builder = p.socks4(proxy.address);
                         match proxy.user_id {
@@ -4849,15 +4862,7 @@ pub unsafe extern "C" fn msb_sandbox_exec(
                 .await
                 .map_err(FfiError::from)?;
 
-            let stdout = output.stdout().unwrap_or_default();
-            let stderr = output.stderr().unwrap_or_default();
-            let exit_code = output.status().code;
-            Ok(serde_json::json!({
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": exit_code,
-            })
-            .to_string())
+            Ok(exec_adapter::collected_output_json(&output))
         }))
     })
 }
@@ -4902,12 +4907,7 @@ pub unsafe extern "C" fn msb_sandbox_exec_default(
                 .await
                 .map_err(FfiError::from)?;
 
-            Ok(serde_json::json!({
-                "stdout": output.stdout().unwrap_or_default(),
-                "stderr": output.stderr().unwrap_or_default(),
-                "exit_code": output.status().code,
-            })
-            .to_string())
+            Ok(exec_adapter::collected_output_json(&output))
         }))
     })
 }
@@ -6241,53 +6241,7 @@ pub unsafe extern "C" fn msb_volume_fs_op(
                 FfiError::invalid_argument(format!("invalid volume fs args: {error}"))
             })?;
         Ok(Box::pin(async move {
-            let path = args["path"]
-                .as_str()
-                .ok_or_else(|| FfiError::invalid_argument("missing volume fs path"))?;
-            // Rust handles encode cloud volume UUIDs as `cloud-id:<uuid>`.
-            // Reusing that target here preserves handle identity across a
-            // named volume delete/recreate instead of resolving by name.
-            let backend = default_backend();
-            let fs = VolumeFs::with_backend(backend, &target);
-            match op.as_str() {
-                "read" => {
-                    let data = fs.read(path).await.map_err(FfiError::from)?;
-                    Ok(serde_json::json!({
-                        "data_b64": base64::engine::general_purpose::STANDARD.encode(data)
-                    })
-                    .to_string())
-                }
-                "write" => {
-                    let encoded = args["data_b64"]
-                        .as_str()
-                        .ok_or_else(|| FfiError::invalid_argument("missing volume fs data"))?;
-                    let data = base64::engine::general_purpose::STANDARD
-                        .decode(encoded)
-                        .map_err(|error| {
-                            FfiError::invalid_argument(format!("invalid base64 data: {error}"))
-                        })?;
-                    fs.write(path, data).await.map_err(FfiError::from)?;
-                    Ok(r#"{"ok":true}"#.into())
-                }
-                "mkdir" => {
-                    fs.mkdir(path).await.map_err(FfiError::from)?;
-                    Ok(r#"{"ok":true}"#.into())
-                }
-                "remove" => {
-                    let recursive = args["recursive"].as_bool().unwrap_or(false);
-                    if recursive {
-                        fs.remove_dir(path).await.map_err(FfiError::from)?;
-                    } else {
-                        fs.remove(path).await.map_err(FfiError::from)?;
-                    }
-                    Ok(r#"{"ok":true}"#.into())
-                }
-                "exists" => {
-                    let exists = fs.exists(path).await.map_err(FfiError::from)?;
-                    Ok(serde_json::json!({ "exists": exists }).to_string())
-                }
-                _ => Err(FfiError::invalid_argument("unknown volume fs operation")),
-            }
+            volume_fs::dispatch(&target, &op, &args).await
         }))
     })
 }
@@ -6476,6 +6430,7 @@ pub unsafe extern "C" fn msb_image_prune(
                 "layers_removed": report.layers_removed,
                 "fsmeta_removed": report.fsmeta_removed,
                 "vmdk_removed": report.vmdk_removed,
+                "skipped_in_use": report.skipped_in_use,
                 "bytes_reclaimed": report.bytes_reclaimed,
             })
             .to_string())

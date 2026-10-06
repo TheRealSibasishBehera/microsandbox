@@ -11,7 +11,9 @@ use microsandbox_types::modify::{
     ResourceResizeStatus, SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind,
     SecretModificationPatch, SecretPlannedChange, SecretSource,
 };
-use microsandbox_types::{EnvVar, RootDisk, RootfsSource};
+use microsandbox_types::{
+    EnvVar, RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction,
+};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
 use crate::MicrosandboxResult;
@@ -31,6 +33,8 @@ const LIVE_RESIZE_UNAVAILABLE: &str =
     "live CPU and memory resize are not available in this runtime yet";
 const LIVE_SECRET_RECONFIGURE_UNAVAILABLE: &str =
     "live secret reconfiguration is not available in this runtime yet";
+const SECRET_POLICY_REQUIRES_RESTART: &str =
+    "secret policy changes require restart; use restart or next_start";
 const LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE: &str =
     "affects future execs only after restart; live exec-default updates are not available yet";
 const LIVE_LABEL_UPDATE_UNAVAILABLE: &str =
@@ -65,6 +69,10 @@ struct DesiredResources {
 struct ExistingSecret {
     placeholder: String,
     allowed_hosts: Vec<String>,
+    substitution: SecretSubstitution,
+    passthrough_hosts: Vec<String>,
+    violation_action: Option<SecretViolationAction>,
+    require_tls_identity: bool,
 }
 
 /// Live-control operations the running sandbox process actually serves,
@@ -326,6 +334,7 @@ fn build_plan(
     push_secret_changes(
         status,
         config,
+        active,
         live.secrets,
         &patch,
         policy,
@@ -1391,9 +1400,11 @@ fn root_disk_size_state(config: &SandboxConfig) -> Option<RootDiskSizeState> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_secret_changes(
     status: SandboxStatus,
     config: &SandboxConfig,
+    active: Option<&SandboxConfig>,
     live_secret_reconfigure_supported: bool,
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
@@ -1402,34 +1413,61 @@ fn push_secret_changes(
 ) {
     for spec in &patch.secrets {
         let existing = existing_secret(config, &spec.name);
+        let policy_changed = secret_policy_changes(spec, existing.as_ref())
+            || (running_status(status)
+                && active.is_some_and(|active| {
+                    secret_policy_changes(spec, existing_secret(active, &spec.name).as_ref())
+                }));
         let Some(change) = infer_secret_change(spec, existing.as_ref()) else {
-            // The spec already matches the current config: declarative no-op.
+            if policy_changed {
+                // Use the existing generic config-change contract: older SDKs
+                // need no new SecretChangeKind variant to decode this plan.
+                changes.push(spec_change(
+                    &format!("secret.{}.policy", spec.name),
+                    ChangeKind::Updated,
+                    None,
+                    None,
+                    status,
+                    policy,
+                    SECRET_POLICY_REQUIRES_RESTART,
+                ));
+            }
             continue;
         };
         let placeholder_changed = secret_placeholder_changes(spec, existing.as_ref());
-        let disposition = secret_disposition(
-            status,
-            policy,
-            change,
-            placeholder_changed,
-            live_secret_reconfigure_supported,
-        );
-        let reason = secret_reason(
-            status,
-            policy,
-            change,
-            placeholder_changed,
-            live_secret_reconfigure_supported,
-        );
+        let disposition = if policy_changed {
+            spec_disposition(status, policy)
+        } else {
+            secret_disposition(
+                status,
+                policy,
+                change,
+                placeholder_changed,
+                live_secret_reconfigure_supported,
+            )
+        };
+        let reason = if policy_changed {
+            spec_reason(status, policy, SECRET_POLICY_REQUIRES_RESTART)
+        } else {
+            secret_reason(
+                status,
+                policy,
+                change,
+                placeholder_changed,
+                live_secret_reconfigure_supported,
+            )
+        };
 
-        push_live_secret_warning(
-            status,
-            change,
-            placeholder_changed,
-            &disposition,
-            live_secret_reconfigure_supported,
-            warnings,
-        );
+        if !policy_changed {
+            push_live_secret_warning(
+                status,
+                change,
+                placeholder_changed,
+                &disposition,
+                live_secret_reconfigure_supported,
+                warnings,
+            );
+        }
 
         changes.push(PlannedChange::Secret(SecretPlannedChange {
             field: SECRET_FIELD.to_string(),
@@ -1557,6 +1595,30 @@ fn secret_placeholder_changes(
         (Some(_), None) => true,
         (None, _) => false,
     }
+}
+
+/// Compare only supplied policy fields; omitted options and empty host lists
+/// leave an existing policy unchanged, matching persistence semantics.
+fn secret_policy_changes(
+    spec: &SecretModificationPatch,
+    existing: Option<&ExistingSecret>,
+) -> bool {
+    let Some(existing) = existing else {
+        return false;
+    };
+    spec.substitution.as_ref().is_some_and(|substitution| {
+        substitution.headers != existing.substitution.headers
+            || substitution.query != existing.substitution.query
+            || substitution.body != existing.substitution.body
+    }) || (!spec.passthrough_hosts.is_empty()
+        && spec.passthrough_hosts != existing.passthrough_hosts)
+        || spec
+            .violation_action
+            .as_ref()
+            .is_some_and(|action| Some(action) != existing.violation_action.as_ref())
+        || spec
+            .require_tls_identity
+            .is_some_and(|required| required != existing.require_tls_identity)
 }
 
 /// Warn when a live-capable secret change falls back to restart-required
@@ -2085,6 +2147,14 @@ fn existing_secret_from_network_config(
         .find(|secret| secret.env_var == name)
         .map(|secret| ExistingSecret {
             placeholder: secret.placeholder,
+            substitution: secret.substitution,
+            passthrough_hosts: secret
+                .passthrough_hosts
+                .into_iter()
+                .map(format_host_pattern)
+                .collect(),
+            violation_action: secret.violation_action,
+            require_tls_identity: secret.require_tls_identity,
             allowed_hosts: secret
                 .allowed_hosts
                 .into_iter()

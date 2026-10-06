@@ -510,6 +510,10 @@ pub enum Operation {
     VolumeFsWriteStream,
     /// `Image::get`.
     ImageGet,
+    /// `Storage::usage` and per-object storage observations.
+    StorageUsage,
+    /// `Storage::prune`.
+    StoragePrune,
     /// `Image::list`.
     ImageList,
     /// `Image::inspect`.
@@ -623,6 +627,8 @@ impl Operation {
             Operation::VolumeFsReadStream => "VolumeFs::read_stream",
             Operation::VolumeFsWriteStream => "VolumeFs::write_stream",
             Operation::ImageGet => "Image::get",
+            Operation::StorageUsage => "Storage::usage",
+            Operation::StoragePrune => "Storage::prune",
             Operation::ImageList => "Image::list",
             Operation::ImageInspect => "Image::inspect",
             Operation::ImageRemove => "Image::remove",

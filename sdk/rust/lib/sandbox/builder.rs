@@ -226,6 +226,7 @@ impl SandboxBuilder {
     #[doc(hidden)]
     pub fn override_snapshot(mut self, snapshot: impl Into<String>) -> Self {
         self.config.spec.image = Some(RootfsSource::oci(""));
+        self.config.local_restore_paths_resolved = Some(false);
         self.pending_snapshot = Some(SnapshotReference::auto(snapshot));
         self.pending_snapshot_from_config = false;
         self
@@ -370,6 +371,18 @@ impl SandboxBuilder {
     /// the cost of coarser memory allocation, while `Never` disables THP.
     pub fn thp(mut self, policy: super::TransparentHugePagePolicy) -> Self {
         self.config.spec.resources.thp = Some(policy);
+        self
+    }
+
+    /// Select how the host manages the guest wall clock (`CLOCK_REALTIME`).
+    ///
+    /// `Sync` is the default: the host sets the guest clock at boot, about once a
+    /// minute, and when a full snapshot restores or a paused sandbox resumes. `Off`
+    /// leaves the guest clock alone after boot, so a restored full snapshot keeps
+    /// the captured guest time. Snapshots record `Off`, and restores keep it unless
+    /// they set a policy explicitly.
+    pub fn guest_clock(mut self, policy: super::GuestClockPolicy) -> Self {
+        self.config.spec.runtime.guest_clock = Some(policy);
         self
     }
 
@@ -1209,6 +1222,7 @@ impl SandboxBuilder {
 
     /// Supply the base snapshot or standalone archive for omitted disk layers and RAM objects.
     pub(crate) fn snapshot_base(mut self, base: impl Into<String>) -> Self {
+        self.config.local_restore_paths_resolved = Some(false);
         self.config.snapshot_base = Some(base.into());
         self
     }
@@ -1223,6 +1237,7 @@ impl SandboxBuilder {
         mut self,
         reference: impl Into<SnapshotReference>,
     ) -> Self {
+        self.config.local_restore_paths_resolved = Some(false);
         self.pending_snapshot = Some(reference.into());
         self.pending_snapshot_from_config = false;
         self
@@ -1241,6 +1256,7 @@ impl SandboxBuilder {
         image_manifest_digest: impl Into<String>,
         upper_source: impl Into<std::path::PathBuf>,
     ) -> Self {
+        self.config.local_restore_paths_resolved = Some(false);
         let upper_source = upper_source.into();
         self.config.manifest_digest = Some(Some(image_manifest_digest.into()));
         if let Some(artifact_dir) = upper_source.parent() {
@@ -1378,6 +1394,22 @@ impl SandboxBuilder {
         }
     }
 
+    /// Capture local inputs before any await or spawn; remote inputs belong to the server.
+    #[cfg(feature = "local")]
+    pub(crate) fn capture_host_paths(
+        &mut self,
+        backend: &dyn crate::Backend,
+    ) -> MicrosandboxResult<()> {
+        if backend.as_local().is_some() {
+            let captured = self.config.local_restore_paths_resolved == Some(true);
+            crate::backend::local::host_paths::resolve_patch_paths(&mut self.config)?;
+            if !captured && let Some(reference) = &mut self.pending_snapshot {
+                crate::backend::local::host_paths::resolve_snapshot_reference(reference)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve deferred builder inputs without materializing sandbox configuration.
     /// The backend borrows only the pending fields needed before image resolution.
     pub(crate) async fn prepare(
@@ -1390,6 +1422,8 @@ impl SandboxBuilder {
         for name in self.config_scripts.keys() {
             validate_config_script_name(name).map_err(MicrosandboxError::InvalidConfig)?;
         }
+        #[cfg(feature = "local")]
+        self.capture_host_paths(backend.as_ref())?;
         self.resolve_pending(backend).await?;
         Ok(&mut self.config)
     }
@@ -1429,6 +1463,10 @@ impl SandboxBuilder {
             None,
         );
         config.restore_overrides = overrides;
+        #[cfg(feature = "local")]
+        if backend.as_local().is_some() {
+            crate::backend::local::host_paths::resolve_host_paths(&mut config)?;
+        }
         backend
             .snapshots()
             .prepare_restore(backend.clone(), &mut config, snapshot_ref)
@@ -1522,9 +1560,11 @@ impl SandboxBuilder {
         crate::CreationProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
+        let backend = crate::backend::default_backend();
+        self.capture_host_paths(backend.as_ref())?;
         let (handle, sender) = crate::progress::channel();
         self.config.creation_progress = Some(sender.downgrade());
-        let task = tokio::spawn(async move {
+        let task = tokio::spawn(crate::backend::with_backend(backend, async move {
             if self.pending_snapshot.is_some() {
                 let _ = sender.try_send(crate::CreationProgress::Startup(
                     crate::StartupProgress::phase(crate::StartupPhase::PreparingSnapshot),
@@ -1541,7 +1581,7 @@ impl SandboxBuilder {
             // No detached forwarding task: cancellation drops both futures together.
             let (result, ()) = tokio::join!(create, forward);
             result
-        });
+        }));
         Ok((handle, task))
     }
 
@@ -1566,16 +1606,18 @@ impl SandboxBuilder {
     /// terminal; both operations spawn work without blocking the caller.
     #[cfg(feature = "local")]
     pub fn create_with_pull_progress(
-        self,
+        mut self,
     ) -> MicrosandboxResult<(
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<Sandbox>>,
     )> {
+        let backend = crate::backend::default_backend();
+        self.capture_host_paths(backend.as_ref())?;
         let (handle, sender) = microsandbox_image::progress_channel();
-        let task = tokio::spawn(async move {
+        let task = tokio::spawn(crate::backend::with_backend(backend, async move {
             let detached = self.detached;
             self.create_with_mode(detached, Some(sender)).await
-        });
+        }));
         Ok((handle, task))
     }
 
@@ -1583,13 +1625,17 @@ impl SandboxBuilder {
     /// mode so the sandbox survives after the creating process exits.
     #[cfg(feature = "local")]
     pub fn create_detached_with_pull_progress(
-        self,
+        mut self,
     ) -> MicrosandboxResult<(
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<Sandbox>>,
     )> {
+        let backend = crate::backend::default_backend();
+        self.capture_host_paths(backend.as_ref())?;
         let (handle, sender) = microsandbox_image::progress_channel();
-        let task = tokio::spawn(async move { self.create_with_mode(true, Some(sender)).await });
+        let task = tokio::spawn(crate::backend::with_backend(backend, async move {
+            self.create_with_mode(true, Some(sender)).await
+        }));
         Ok((handle, task))
     }
 
@@ -1973,6 +2019,7 @@ pub(crate) fn prepare_local_snapshot_restore(
     if config.spec.runtime.user.is_none() {
         config.spec.runtime.user = snap.manifest().restore_defaults()?.user;
     }
+    apply_snapshot_guest_clock(config, snap.manifest())?;
     config.snapshot_parent = Some(snap.id().to_string());
     let unsupported = snap.manifest().unsupported_requires();
     if !unsupported.is_empty() {
@@ -2081,6 +2128,21 @@ pub(crate) fn prepare_local_snapshot_restore(
     let owned = snap.manifest().owned_volumes()?;
     if !owned.is_empty() {
         config.snapshot_owned_source = Some((snap.path()?.to_path_buf(), owned));
+    }
+    Ok(())
+}
+
+/// Keep the guest clock policy recorded by a snapshot unless the restore selected one.
+#[cfg(feature = "local")]
+pub(crate) fn apply_snapshot_guest_clock(
+    config: &mut SandboxConfig,
+    manifest: &crate::snapshot::Manifest,
+) -> MicrosandboxResult<()> {
+    if config.spec.runtime.guest_clock.is_none() {
+        let recorded = manifest.guest_clock()?;
+        if !recorded.is_sync() {
+            config.spec.runtime.guest_clock = Some(recorded);
+        }
     }
     Ok(())
 }
@@ -3241,6 +3303,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_builder_guest_clock_defaults_to_unset_and_records_explicit_policy() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(config.spec.runtime.guest_clock, None);
+
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .guest_clock(super::super::GuestClockPolicy::Off)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            config.spec.runtime.guest_clock,
+            Some(super::super::GuestClockPolicy::Off)
+        );
+    }
+
+    #[tokio::test]
     async fn test_builder_sets_runtime_log_level() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
@@ -3774,6 +3857,89 @@ mod tests {
             .finish(Some(&sources), None)
             .unwrap_err();
         assert!(error.to_string().contains("captured root disk layout"));
+    }
+
+    #[cfg(feature = "local")]
+    fn manifest_with_guest_clock(
+        policy: super::super::GuestClockPolicy,
+    ) -> crate::snapshot::Manifest {
+        use microsandbox_image::snapshot::{
+            DiskLayer, DiskLayerId, FileSnapshotState, ImageRef, LayerFileKind, LayerPayload,
+            SCHEMA, SnapshotCapture, SnapshotConsistency, SnapshotFormat, SnapshotId,
+            SnapshotRootDisk, SnapshotScope, SnapshotState,
+        };
+        let layer_id = DiskLayerId::new(format!("layer_{:032x}", 1)).unwrap();
+        let mut manifest = crate::snapshot::Manifest {
+            schema: SCHEMA.into(),
+            snapshot_id: SnapshotId::new(format!("snap_{:032x}", 1)).unwrap(),
+            scope: SnapshotScope::Disk,
+            state: SnapshotState::File(FileSnapshotState {
+                disk_format: SnapshotFormat::Raw,
+                filesystem: "ext4".into(),
+                virtual_size: 4,
+                head: layer_id.clone(),
+                layers: vec![DiskLayer {
+                    layer_id,
+                    format: SnapshotFormat::Raw,
+                    virtual_size: 4,
+                    backing: None,
+                    payload: LayerPayload {
+                        file_kind: LayerFileKind::Regular,
+                        integrity: None,
+                    },
+                }],
+            }),
+            capture: SnapshotCapture {
+                created_at: "2026-09-29T00:00:00Z".into(),
+                source_lineage: Some("source".into()),
+                source_checkpoint: None,
+                consistency: SnapshotConsistency::CrashConsistent,
+            },
+            image: ImageRef {
+                reference: "docker.io/library/alpine:latest".into(),
+                manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            root_disk: SnapshotRootDisk::Managed,
+            parent: None,
+            requires: Vec::new(),
+            extensions: Default::default(),
+        };
+        manifest.set_guest_clock(policy).unwrap();
+        manifest
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn snapshot_restore_keeps_recorded_guest_clock_unless_overridden() {
+        use super::super::GuestClockPolicy;
+
+        let off = manifest_with_guest_clock(GuestClockPolicy::Off);
+        let sync = manifest_with_guest_clock(GuestClockPolicy::Sync);
+
+        // No explicit policy: the recorded one wins, and a sync snapshot leaves the config unset.
+        let mut config = SandboxBuilder::new("restore").config.into_config();
+        super::apply_snapshot_guest_clock(&mut config, &off).unwrap();
+        assert_eq!(config.spec.runtime.guest_clock, Some(GuestClockPolicy::Off));
+        let mut config = SandboxBuilder::new("restore").config.into_config();
+        super::apply_snapshot_guest_clock(&mut config, &sync).unwrap();
+        assert_eq!(config.spec.runtime.guest_clock, None);
+
+        // An explicit restore choice is kept in both directions.
+        let mut config = SandboxBuilder::new("restore")
+            .guest_clock(GuestClockPolicy::Sync)
+            .config
+            .into_config();
+        super::apply_snapshot_guest_clock(&mut config, &off).unwrap();
+        assert_eq!(
+            config.spec.runtime.guest_clock,
+            Some(GuestClockPolicy::Sync)
+        );
+        let mut config = SandboxBuilder::new("restore")
+            .guest_clock(GuestClockPolicy::Off)
+            .config
+            .into_config();
+        super::apply_snapshot_guest_clock(&mut config, &sync).unwrap();
+        assert_eq!(config.spec.runtime.guest_clock, Some(GuestClockPolicy::Off));
     }
 
     #[test]
