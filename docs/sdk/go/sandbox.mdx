@@ -587,7 +587,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Modify()</span>
 
-<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error)
@@ -643,7 +643,7 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 
 </Accordion>
 
-Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
+Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"pending"`, `"requires restart"`, or `"unsupported"`.
 
 `CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
@@ -2437,7 +2437,7 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Modify()</span>
 
-<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 Modify(ctx, opts)
@@ -2951,7 +2951,7 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | Change | `string` | `"added"`, `"updated"`, or `"removed"` for config; `"added"`, `"rotated"`, `"removed"`, `"renamed"`, `"hosts updated"`, or `"placeholder updated"` for secrets |
 | Before / After | `*string` | Previous / new visible state (config entries) |
 | BeforeRef / AfterRef | `*string` | Previous / new guest-visible reference (secret entries) |
-| Disposition | `string` | `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"` |
+| Disposition | `string` | `"live"`, `"next start"`, `"pending"`, `"requires restart"`, or `"unsupported"`; `"pending"` is Cloud only: saved, not yet acknowledged by the running sandbox |
 | AllowHosts | `[]string` | Allowed hosts after the requested change (secret entries) |
 | Reason | `*string` | Human-readable reason for the classification, when useful |
 
