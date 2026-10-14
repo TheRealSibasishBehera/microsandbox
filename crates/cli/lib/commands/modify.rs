@@ -786,7 +786,7 @@ fn replayed_args(args: &ModifyArgs) -> String {
     for secret in &args.secrets {
         // Only accepted flags are echoed; parsing rejects inline values.
         let sanitized = match common::parse_secret(secret, "modify") {
-            Ok(_) => common::shell_quote(secret),
+            Ok(_) => common::hint_quote(secret),
             Err(_) => "<secret>".to_string(),
         };
         rendered.push(format!("--secret {sanitized}"));
@@ -1128,32 +1128,39 @@ mod tests {
             ]
         );
 
-        for (flag, replayed) in [
+        for (flag, posix, windows) in [
             (
                 "API_KEY:headers=[a,b]@h",
-                "--secret 'API_KEY:headers=[a,b]@h' --restart",
+                "'API_KEY:headers=[a,b]@h'",
+                "\"API_KEY:headers=[a,b]@h\"",
             ),
             (
                 "API_KEY:headers=*@h",
-                "--secret 'API_KEY:headers=*@h' --restart",
+                "'API_KEY:headers=*@h'",
+                "\"API_KEY:headers=*@h\"",
             ),
             (
                 "API_KEY:headers=x$y@h",
-                "--secret 'API_KEY:headers=x$y@h' --restart",
+                "'API_KEY:headers=x$y@h'",
+                "\"API_KEY:headers=x$y@h\"",
             ),
             (
                 "API_KEY:headers=x`y@h",
-                "--secret 'API_KEY:headers=x`y@h' --restart",
+                "'API_KEY:headers=x`y@h'",
+                "\"API_KEY:headers=x`y@h\"",
             ),
             (
                 "API_KEY:headers=x'y@h",
-                r"--secret 'API_KEY:headers=x'\''y@h' --restart",
+                r"'API_KEY:headers=x'\''y@h'",
+                "\"API_KEY:headers=x'y@h\"",
             ),
-            ("API_KEY@a, b", "--secret 'API_KEY@a, b' --restart"),
+            ("API_KEY@a, b", "'API_KEY@a, b'", "\"API_KEY@a, b\""),
         ] {
+            let quoted = if cfg!(windows) { windows } else { posix };
+            let replayed = format!("--secret {quoted} --restart");
             let hints = restart_hints(&[flag]);
             assert!(
-                hints.iter().any(|hint| hint.contains(replayed)),
+                hints.iter().any(|hint| hint.contains(&replayed)),
                 "{flag}: {hints:?}"
             );
         }

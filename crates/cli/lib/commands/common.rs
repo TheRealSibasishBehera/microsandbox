@@ -3018,6 +3018,28 @@ pub(crate) fn shell_quote(s: &str) -> String {
     }
 }
 
+/// Quote an argument for a command the user copies into their terminal.
+pub(crate) fn hint_quote(s: &str) -> String {
+    if cfg!(windows) {
+        windows_quote(s)
+    } else {
+        shell_quote(s)
+    }
+}
+
+/// Double-quote a string for Command Prompt or PowerShell, only when necessary.
+fn windows_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '+' | '@')
+        })
+    {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('"', "\\\""))
+    }
+}
+
 /// Parse `--secret ENV[:OPTIONS]@HOST[,HOST...]` for `command`.
 ///
 /// The value is NOT read here: the CLI records a host-side source reference
@@ -3673,6 +3695,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn windows_quote_double_quotes_only_when_needed() {
+        assert_eq!(
+            windows_quote("API_KEY@api.example.com"),
+            "API_KEY@api.example.com"
+        );
+        assert_eq!(
+            windows_quote("API_KEY:headers=[a,b]@h"),
+            "\"API_KEY:headers=[a,b]@h\""
+        );
+        assert_eq!(windows_quote("a'b"), "\"a'b\"");
+        assert_eq!(windows_quote(""), "\"\"");
     }
 
     #[cfg(feature = "net")]
