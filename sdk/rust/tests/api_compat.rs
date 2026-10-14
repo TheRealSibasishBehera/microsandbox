@@ -144,3 +144,22 @@ fn boot_error_reason_is_preserved_in_every_backend_build() {
         }
     }
 }
+
+#[test]
+#[cfg(feature = "cloud")]
+fn rust_modify_surface_is_available_on_cloud_builds() {
+    let _ = microsandbox::Sandbox::modify;
+    let _ = microsandbox::sandbox::SandboxHandle::modify;
+    let _ = microsandbox::SandboxModificationBuilder::dry_run;
+    let _ = microsandbox::SandboxModificationBuilder::apply;
+    let _: Option<microsandbox::SandboxModificationPlan> = None;
+    let _ = microsandbox::ModificationDisposition::Pending;
+    let not_confirmed = microsandbox::MicrosandboxError::ModificationNotConfirmed {
+        cause: "lost".into(),
+    };
+    assert!(
+        not_confirmed
+            .to_string()
+            .contains("sending the same request again does not apply it twice")
+    );
+}

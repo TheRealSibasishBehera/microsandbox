@@ -68,6 +68,17 @@ describe("modifyOptionsToNapi", () => {
     });
     expect(napi?.secretsRemove).toEqual(["OLD"]);
   });
+
+  it("keeps repeated removals so the native planner refuses them", () => {
+    const napi = modifyOptionsToNapi({
+      secrets: { API_KEY: { value: "dummy" }, DB_PASS: {} },
+      secretsRemove: ["OLD", "OLD"],
+    });
+
+    // Configured secrets are keyed by name: one spec per name.
+    expect(Object.keys(napi?.secrets ?? {})).toEqual(["API_KEY", "DB_PASS"]);
+    expect(napi?.secretsRemove).toEqual(["OLD", "OLD"]);
+  });
 });
 
 describe("modificationPlanFromJson", () => {
@@ -98,6 +109,15 @@ describe("modificationPlanFromJson", () => {
             allow_hosts: ["api.example.com"],
             reason: "live secret reconfiguration is not available",
           },
+          {
+            kind: "secret",
+            field: "secret",
+            name: "DB_PASS",
+            change: "rotated",
+            before_ref: "$DB_PASS",
+            after_ref: "$DB_PASS",
+            disposition: "pending",
+          },
         ],
         conflicts: [{ field: "memory", message: "memory must be greater than 0" }],
         warnings: [{ field: "cpus", message: "warning" }],
@@ -127,6 +147,17 @@ describe("modificationPlanFromJson", () => {
         disposition: "requires restart",
         allowHosts: ["api.example.com"],
         reason: "live secret reconfiguration is not available",
+      },
+      {
+        kind: "secret",
+        field: "secret",
+        name: "DB_PASS",
+        change: "rotated",
+        beforeRef: "$DB_PASS",
+        afterRef: "$DB_PASS",
+        disposition: "pending",
+        allowHosts: [],
+        reason: undefined,
       },
     ]);
     expect(plan.conflicts).toEqual([

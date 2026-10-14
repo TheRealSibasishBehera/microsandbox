@@ -832,6 +832,20 @@ mod command_tests {
     }
 
     #[test]
+    fn unconfirmed_modification_prints_display_and_exits_one() {
+        let error: anyhow::Error = microsandbox::MicrosandboxError::ModificationNotConfirmed {
+            cause: "response was lost".into(),
+        }
+        .into();
+
+        assert_eq!(render_anyhow_error(&error), 1);
+        assert_eq!(
+            error.to_string(),
+            "the change was sent but its result is not confirmed: response was lost; sending the same request again does not apply it twice"
+        );
+    }
+
+    #[test]
     fn maintenance_commands_do_not_require_backend_resolution() {
         let maintenance_commands = [
             Cli::try_parse_from(["msb", "doctor"]).unwrap().command,

@@ -373,6 +373,17 @@ pub enum MicrosandboxError {
         reason: UnsupportedReason,
     },
 
+    /// A modification was sent, but its result is not confirmed: it may or may not have happened.
+    /// Sending the same request again does not apply it twice. Only Cloud returns it; `cause`
+    /// never holds a secret value.
+    #[error(
+        "the change was sent but its result is not confirmed: {cause}; sending the same request again does not apply it twice"
+    )]
+    ModificationNotConfirmed {
+        /// What failed after the request was sent.
+        cause: String,
+    },
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),
@@ -875,6 +886,18 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "timed out after 360s waiting for sandbox \"cloud-sandbox\" to stop; the accepted stop may still complete"
+        );
+    }
+
+    #[test]
+    fn modification_not_confirmed_explains_that_resending_does_not_apply_twice() {
+        let error = MicrosandboxError::ModificationNotConfirmed {
+            cause: "response was lost".into(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "the change was sent but its result is not confirmed: response was lost; sending the same request again does not apply it twice"
         );
     }
 }

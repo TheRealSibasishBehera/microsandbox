@@ -13,6 +13,7 @@ export type ModificationPolicy = "no_restart" | "next_start" | "restart";
 export type ModificationDisposition =
   | "live"
   | "next start"
+  | "pending"
   | "requires restart"
   | "unsupported";
 
