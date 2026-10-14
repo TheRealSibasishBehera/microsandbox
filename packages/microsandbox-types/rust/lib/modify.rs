@@ -2,9 +2,9 @@
 //!
 //! These are the serializable request/response types behind `sandbox.modify()`:
 //! the patch a caller submits, and the plan that classifies each change. The
-//! builder and classification logic live in the SDK; this module owns only the
-//! wire-shaped data so any backend (local today, cloud later) and any language
-//! binding can speak the same contract.
+//! builder lives in the SDK and secret classification in the shared
+//! `secret_plan` module; this module owns only the wire-shaped data so every
+//! backend and every language binding speaks the same contract.
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -104,6 +104,7 @@ pub struct PublishedPortKey {
 
 /// Policy selected for applying or planning a modification.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ModificationPolicy {
@@ -202,6 +203,7 @@ impl SecretSource {
 
 /// Serializable dry-run or apply plan for a sandbox modification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxModificationPlan {
     /// Sandbox being modified.
@@ -232,6 +234,7 @@ pub struct SandboxModificationPlan {
 
 /// One planned modification entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlannedChange {
@@ -244,6 +247,7 @@ pub enum PlannedChange {
 
 /// Planned config change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ConfigPlannedChange {
     /// Config field being changed.
@@ -270,6 +274,7 @@ pub struct ConfigPlannedChange {
 
 /// Planned secret change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SecretPlannedChange {
     /// Table field name. This is always `secret`.
@@ -303,6 +308,7 @@ pub struct SecretPlannedChange {
 
 /// Natural config change type for human output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum ChangeKind {
@@ -318,6 +324,7 @@ pub enum ChangeKind {
 
 /// Natural secret change type for human output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum SecretChangeKind {
     /// A secret placeholder is being added.
@@ -347,6 +354,7 @@ pub enum SecretChangeKind {
 
 /// When or whether a planned change can take effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum ModificationDisposition {
     /// Applies to the running VM now.
@@ -356,6 +364,12 @@ pub enum ModificationDisposition {
     /// Persists to desired config and applies the next time the sandbox starts.
     #[serde(rename = "next start")]
     NextStart,
+
+    /// Saved; the running sandbox has not acknowledged it yet, so it may still use the old
+    /// value or settings. Every start uses the saved state, or the sandbox does not start.
+    /// Sending the same change again retries delivery.
+    #[serde(rename = "pending")]
+    Pending,
 
     /// Needs a restart before it can take effect.
     #[serde(rename = "requires restart")]
@@ -368,6 +382,7 @@ pub enum ModificationDisposition {
 
 /// Conflict that blocks applying a modification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ModificationConflict {
     /// Field with the conflict.
@@ -379,6 +394,7 @@ pub struct ModificationConflict {
 
 /// Warning emitted while planning a modification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ModificationWarning {
     /// Field associated with the warning.
@@ -390,6 +406,7 @@ pub struct ModificationWarning {
 
 /// Resource kind used by live resize convergence reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
@@ -402,6 +419,7 @@ pub enum ResourceKind {
 
 /// Runtime convergence state for an accepted resource resize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceConvergenceState {
@@ -423,6 +441,7 @@ pub enum ResourceConvergenceState {
 
 /// Status for a live resource resize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ResourceResizeStatus {
     /// Resource being resized.
@@ -454,5 +473,24 @@ impl std::fmt::Debug for SecretModificationPatch {
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
             .finish()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::ModificationDisposition;
+
+    #[test]
+    fn pending_round_trips() {
+        let wire = serde_json::to_string(&ModificationDisposition::Pending).unwrap();
+        assert_eq!(wire, r#""pending""#);
+        assert_eq!(
+            serde_json::from_str::<ModificationDisposition>(&wire).unwrap(),
+            ModificationDisposition::Pending
+        );
     }
 }

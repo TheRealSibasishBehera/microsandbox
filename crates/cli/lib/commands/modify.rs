@@ -715,6 +715,7 @@ fn disposition_label(disposition: ModificationDisposition) -> &'static str {
     match disposition {
         ModificationDisposition::Live => "live",
         ModificationDisposition::NextStart => "next start",
+        ModificationDisposition::Pending => "pending",
         ModificationDisposition::RequiresRestart => "requires restart",
         ModificationDisposition::Unsupported => "unsupported",
     }
@@ -1021,6 +1022,14 @@ mod tests {
         assert_eq!(
             convergence_label(ResourceConvergenceState::Failed),
             "failed"
+        );
+    }
+
+    #[test]
+    fn pending_disposition_renders_plainly() {
+        assert_eq!(
+            disposition_label(ModificationDisposition::Pending),
+            "pending"
         );
     }
 

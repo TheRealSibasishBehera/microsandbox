@@ -429,6 +429,7 @@ pub fn format_disposition(disposition: &str) -> String {
         "live" => format!("{}", style("live").green().bold()),
         "requires restart" => format!("{}", style("requires restart").yellow().bold()),
         "next start" => format!("{}", style("next start").dim()),
+        "pending" => format!("{}", style("pending").yellow().bold()),
         "unsupported" => format!("{}", style("unsupported").red().bold()),
         other => other.to_lowercase(),
     }
@@ -903,6 +904,14 @@ mod tests {
         assert_eq!(
             super::action_message("A much longer action label", "TARGET"),
             "A much longer action label  TARGET"
+        );
+    }
+
+    #[test]
+    fn pending_disposition_uses_warning_style() {
+        assert_eq!(
+            super::format_disposition("pending"),
+            format!("{}", console::style("pending").yellow().bold())
         );
     }
 
