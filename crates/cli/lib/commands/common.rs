@@ -678,6 +678,8 @@ pub(crate) struct ParsedSecret {
     pub(crate) substitute_header_fields: Vec<String>,
     pub(crate) substitute_query: bool,
     pub(crate) substitute_body: bool,
+    /// Whether a substitution option was given.
+    pub(crate) substitution_specified: bool,
 }
 
 /// Parsed public CLI mount options.
@@ -3049,6 +3051,7 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
         substitute_header_fields: Vec::new(),
         substitute_query: false,
         substitute_body: false,
+        substitution_specified: false,
     };
     if let Some(options) = options {
         // `no-headers` and `headers=` express opposite header scopes and must
@@ -3065,9 +3068,16 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
                     }
                     headers_disabled = true;
                     parsed.substitute_headers = false;
+                    parsed.substitution_specified = true;
                 }
-                "query" => parsed.substitute_query = true,
-                "body" => parsed.substitute_body = true,
+                "query" => {
+                    parsed.substitute_query = true;
+                    parsed.substitution_specified = true;
+                }
+                "body" => {
+                    parsed.substitute_body = true;
+                    parsed.substitution_specified = true;
+                }
                 value if value.starts_with("headers=") => {
                     if headers_disabled {
                         anyhow::bail!(
@@ -3124,6 +3134,7 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
                         parsed_fields
                     };
                     header_scope_selected = true;
+                    parsed.substitution_specified = true;
                 }
                 value if value.starts_with("passthrough=") => {
                     let hosts = value.trim_start_matches("passthrough=");
@@ -3811,6 +3822,7 @@ mod tests {
 
         assert_eq!(secret.env_var, "MSB_PARSE_SECRET_TOKEN");
         assert_eq!(secret.allowed_hosts, vec!["api.example.com"]);
+        assert!(!secret.substitution_specified);
     }
 
     #[test]
@@ -3839,6 +3851,7 @@ mod tests {
         assert!(!secret.substitute_headers);
         assert!(secret.substitute_query);
         assert!(secret.substitute_body);
+        assert!(secret.substitution_specified);
         assert_eq!(
             secret.passthrough_hosts,
             vec!["api.anthropic.com", "example.com", "*.example.org"]
@@ -3854,6 +3867,7 @@ mod tests {
         )
         .unwrap();
         assert!(secret.substitute_headers);
+        assert!(secret.substitution_specified);
         assert_eq!(
             secret.substitute_header_fields,
             vec!["authorization", "x-api-key"]
@@ -3867,6 +3881,7 @@ mod tests {
         // `*` restores the default of every header.
         let all = parse_secret("API_KEY:headers=*@api.example.com", "create").unwrap();
         assert!(all.substitute_header_fields.is_empty());
+        assert!(all.substitution_specified);
 
         // Mixing the wildcard with concrete field names must not silently widen
         // the scope to every header.
