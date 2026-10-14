@@ -3,6 +3,8 @@
 #![warn(missing_docs)]
 #![allow(clippy::module_inception)]
 
+#[cfg(doctest)]
+mod api_boundary;
 mod error;
 #[cfg(test)]
 mod test_support;
@@ -112,32 +114,3 @@ pub use snapshot::{
 };
 pub use storage::{Storage, StorageCategoryUsage, StorageItemUsage, StorageUsage};
 pub use volume::{Volume, VolumeConfig, VolumeHandle, VolumeKind, VolumeSpec};
-
-//--------------------------------------------------------------------------------------------------
-// Tests
-//--------------------------------------------------------------------------------------------------
-
-/// The secret planner in `microsandbox_types::secret_plan` is not SDK API: the plan types are,
-/// the planner is not.
-///
-/// ```
-/// fn applied(plan: &microsandbox::SandboxModificationPlan) -> bool {
-///     plan.applied
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use microsandbox::secret_plan;
-/// ```
-///
-/// ```compile_fail
-/// use microsandbox::SecretPlanInput;
-/// ```
-///
-/// ```compile_fail
-/// fn refusal_reason(plan: &microsandbox::SandboxModificationPlan) -> Option<String> {
-///     plan.refusal_reason()
-/// }
-/// ```
-#[cfg(doctest)]
-pub struct SecretPlanIsNotUserApi;
