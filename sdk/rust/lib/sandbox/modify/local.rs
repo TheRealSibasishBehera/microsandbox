@@ -5515,6 +5515,45 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn next_start_placeholder_then_same_change_no_restart_requires_restart() {
+        let patch = patch_with_specs(vec![SecretModificationPatch {
+            placeholder: Some("$NEW".into()),
+            ..bare_spec("API_KEY", &["*.example.org"])
+        }]);
+        let (saved_plan, plan) = next_start_then_no_restart(&patch);
+        assert_eq!(
+            secret_plan_kinds(&saved_plan),
+            vec![SecretChangeKind::PlaceholderUpdated]
+        );
+        assert_eq!(
+            secret_plan_dispositions(&saved_plan),
+            vec![ModificationDisposition::NextStart]
+        );
+
+        assert_eq!(
+            secret_plan_kinds(&plan),
+            vec![SecretChangeKind::PlaceholderUpdated]
+        );
+        assert_eq!(
+            secret_plan_dispositions(&plan),
+            vec![ModificationDisposition::RequiresRestart]
+        );
+        assert!(validate_apply_supported(&plan).is_err());
+
+        // Apply mirrors the patch into the active snapshot only after a live
+        // update. None is sent, so the snapshot keeps the running placeholder.
+        let updates = live_secret_updates(&plan, &patch).unwrap();
+        assert!(updates.is_empty());
+        let mut active = config_with_secret("API_KEY", SECRET_SENTINEL);
+        if !updates.is_empty() {
+            apply_secret_patch_to_config(&mut active, &patch).unwrap();
+        }
+        let network = active.local_network_config().unwrap();
+        assert_eq!(network.secrets.secrets[0].placeholder, "$MSB_API_KEY");
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn next_start_removal_then_same_change_no_restart_is_live() {
         use microsandbox_runtime::control::SecretLiveChange;
 

@@ -187,7 +187,7 @@ fn push_secret_changes(input: &SecretPlanInput<'_>, output: &mut SecretPlanOutpu
         let saved = saved(input, &spec.name);
         let running = running(input, &spec.name);
         let policy_changed = policy_changes(spec, saved, running);
-        let placeholder_changed = placeholder_changes(spec, saved);
+        let placeholder_changed = placeholder_changes(spec, saved, running);
         let hosts_changed = !spec.allowed_hosts.is_empty()
             && field_changes(
                 spec.allowed_hosts.as_slice(),
@@ -422,7 +422,7 @@ fn push_shared_placeholder_conflicts(
         let placeholder = spec
             .and_then(|spec| spec.placeholder.clone())
             .unwrap_or_else(|| saved.placeholder.clone());
-        let touched = spec.is_some_and(|spec| placeholder_changes(spec, Some(saved)));
+        let touched = spec.is_some_and(|spec| placeholder_changes(spec, Some(saved), None));
         placeholders.push((&saved.name, placeholder, touched));
     }
     for spec in input.secrets {
@@ -489,14 +489,22 @@ fn infer_secret_change(
 }
 
 /// Whether the spec asks for a guest-visible placeholder different from the
-/// saved one. Placeholder changes cannot reach running processes, so they
-/// disqualify an otherwise live-capable change.
-fn placeholder_changes(spec: &DesiredSecret, saved: Option<&SecretSettings>) -> bool {
-    match (&spec.placeholder, saved) {
-        (Some(placeholder), Some(saved)) => *placeholder != saved.placeholder,
-        (Some(_), None) => true,
-        (None, _) => false,
-    }
+/// saved one or the running one. Placeholder changes cannot reach running
+/// processes, so they disqualify an otherwise live-capable change.
+fn placeholder_changes(
+    spec: &DesiredSecret,
+    saved: Option<&SecretSettings>,
+    running: Option<&RunningSecret>,
+) -> bool {
+    spec.placeholder.as_deref().is_some_and(|placeholder| {
+        saved.is_none()
+            || field_changes(
+                placeholder,
+                |settings| settings.placeholder.as_str(),
+                saved,
+                running,
+            )
+    })
 }
 
 /// Whether any supplied policy field changes. Omitted options and empty host
@@ -944,6 +952,63 @@ mod tests {
         // The same supplied rule, saved and running alike, is no change.
         let output = running(&saved, Some(&known(&saved)), &secrets, &[]).plan();
         assert!(output.changes.is_empty());
+    }
+
+    #[test]
+    fn placeholder_saved_but_not_running_requires_restart() {
+        let saved = [SecretSettings {
+            placeholder: "$NEW".into(),
+            ..settings("API_KEY", &["b.test"])
+        }];
+        let running_secrets = known(&[settings("API_KEY", &["a.test"])]);
+        let replay = [DesiredSecret {
+            placeholder: Some("$NEW".into()),
+            ..desired("API_KEY", &["b.test"])
+        }];
+        for policy in [ModificationPolicy::NoRestart, ModificationPolicy::Restart] {
+            let output = Case {
+                capability: LOCAL,
+                policy,
+                ..running(&saved, Some(&running_secrets), &replay, &[])
+            }
+            .plan();
+            let entries = secret_entries(&output);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].change, SecretChangeKind::PlaceholderUpdated);
+            assert_eq!(
+                entries[0].disposition,
+                ModificationDisposition::RequiresRestart
+            );
+            assert!(output.aspects["API_KEY"].contains(&SecretAspect::PlaceholderUpdated));
+        }
+
+        // A rotation that restates the placeholder does not go live either.
+        let rotate = [DesiredSecret {
+            placeholder: Some("$NEW".into()),
+            ..rotation("API_KEY", &[])
+        }];
+        let output = running(&saved, Some(&running_secrets), &rotate, &[]).plan();
+        assert_eq!(
+            secret_entries(&output)[0].disposition,
+            ModificationDisposition::RequiresRestart
+        );
+
+        // An unknown run cannot be shown to have the placeholder.
+        let output = running(&saved, Some(&unknown(&["API_KEY"])), &replay, &[]).plan();
+        assert_eq!(
+            secret_entries(&output)[0].disposition,
+            ModificationDisposition::RequiresRestart
+        );
+
+        // A run that has the placeholder is no change, and an omitted
+        // placeholder is never a placeholder change.
+        let output = running(&saved, Some(&known(&saved)), &replay, &[]).plan();
+        assert!(output.changes.is_empty());
+        let hosts_only = [desired("API_KEY", &["b.test"])];
+        let output = running(&saved, Some(&running_secrets), &hosts_only, &[]).plan();
+        let entries = secret_entries(&output);
+        assert_eq!(entries[0].change, SecretChangeKind::HostsUpdated);
+        assert_eq!(entries[0].disposition, ModificationDisposition::Live);
     }
 
     #[test]
