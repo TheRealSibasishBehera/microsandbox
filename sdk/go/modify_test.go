@@ -177,6 +177,33 @@ func TestModifyRequestJSONSecretSources(t *testing.T) {
 	}
 }
 
+// Repeated removals reach the native patch as given, so the Rust planner
+// refuses them; configured secrets are keyed by name, one spec each.
+func TestModifyRequestJSONSecretNamesAreNotDeduped(t *testing.T) {
+	out := marshalModifyRequest(t, ModifyOptions{
+		Secrets: map[string]SecretModifySpec{
+			"DB_PASS": {},
+			"API_KEY": {},
+		},
+		SecretsRemove: []string{"OLD", "OLD"},
+	})
+
+	patch := out["patch"].(map[string]any)
+	secrets := patch["secrets"].([]any)
+	if len(secrets) != 2 {
+		t.Fatalf("expected 2 secrets; got %d", len(secrets))
+	}
+	for i, name := range []string{"API_KEY", "DB_PASS"} {
+		if got := secrets[i].(map[string]any)["name"]; got != name {
+			t.Fatalf("secrets[%d] name = %v; want %s", i, got, name)
+		}
+	}
+	remove := patch["secrets_remove"].([]any)
+	if len(remove) != 2 || remove[0] != "OLD" || remove[1] != "OLD" {
+		t.Fatalf("secrets_remove = %v", remove)
+	}
+}
+
 func TestModifyRequestJSONSecretMutualExclusion(t *testing.T) {
 	for _, spec := range []SecretModifySpec{
 		{Env: "HOST_VAR", Value: "sk_test_123"},
@@ -224,6 +251,15 @@ func TestParseModificationPlan(t *testing.T) {
 				"after_ref": "$API_KEY",
 				"disposition": "requires restart",
 				"allow_hosts": ["api.example.com"]
+			},
+			{
+				"kind": "secret",
+				"field": "secret",
+				"name": "DB_PASS",
+				"change": "rotated",
+				"before_ref": "$DB_PASS",
+				"after_ref": "$DB_PASS",
+				"disposition": "pending"
 			}
 		],
 		"conflicts": [{"field": "memory", "message": "memory must be greater than 0"}],
@@ -240,7 +276,7 @@ func TestParseModificationPlan(t *testing.T) {
 	if plan.Policy != ModificationPolicyNoRestart {
 		t.Fatalf("policy = %q", plan.Policy)
 	}
-	if len(plan.Changes) != 2 {
+	if len(plan.Changes) != 3 {
 		t.Fatalf("changes = %+v", plan.Changes)
 	}
 
@@ -261,6 +297,11 @@ func TestParseModificationPlan(t *testing.T) {
 	}
 	if len(secret.AllowHosts) != 1 || secret.AllowHosts[0] != "api.example.com" {
 		t.Fatalf("secret allow_hosts = %+v", secret.AllowHosts)
+	}
+
+	pending := plan.Changes[2]
+	if pending.Name != "DB_PASS" || pending.Disposition != "pending" {
+		t.Fatalf("pending secret change = %+v", pending)
 	}
 
 	if len(plan.Conflicts) != 1 || plan.Conflicts[0].Field != "memory" {

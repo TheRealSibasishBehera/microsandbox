@@ -40,6 +40,11 @@ class CloudHttpError(MicrosandboxError):
     code = "cloud-http"
 
 
+class ModificationNotConfirmedError(MicrosandboxError):
+    """A sent modification may or may not have happened; resending does not apply it twice."""
+    code = "modification-not-confirmed"
+
+
 class SandboxNotFoundError(MicrosandboxError):
     """Sandbox does not exist."""
     code = "sandbox-not-found"

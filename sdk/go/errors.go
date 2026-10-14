@@ -171,6 +171,10 @@ const (
 	// ErrSandboxStopTimedOut indicates graceful shutdown was not observed
 	// before the SDK's deadline and may still complete asynchronously.
 	ErrSandboxStopTimedOut
+
+	// ErrModificationNotConfirmed indicates a sent change may or may not have
+	// happened. Sending the same request again does not apply it twice.
+	ErrModificationNotConfirmed
 )
 
 func (k ErrorKind) String() string {
@@ -253,6 +257,8 @@ func (k ErrorKind) String() string {
 		return "MetricsUnavailable"
 	case ErrUnsupportedOperation:
 		return "UnsupportedOperation"
+	case ErrModificationNotConfirmed:
+		return "ModificationNotConfirmed"
 	case ErrInternal:
 		return "Internal"
 	case ErrNoDefaultCommand:
@@ -438,6 +444,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrMetricsUnavailable
 	case ffi.KindUnsupportedOperation:
 		return ErrUnsupportedOperation
+	case ffi.KindModificationNotConfirmed:
+		return ErrModificationNotConfirmed
 	default:
 		return ErrInternal
 	}

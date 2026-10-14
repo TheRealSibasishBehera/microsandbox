@@ -115,6 +115,7 @@ class SecretChangeKind(StrEnum):
 class ModificationDisposition(StrEnum):
     LIVE = "live"
     NEXT_START = "next start"
+    PENDING = "pending"
     REQUIRES_RESTART = "requires restart"
     UNSUPPORTED = "unsupported"
 

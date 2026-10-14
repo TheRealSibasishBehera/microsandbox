@@ -138,6 +138,7 @@ def test_new_enum_domains_have_canonical_values() -> None:
     assert PlannedChangeKind.SECRET.value == "secret"
     assert ChangeKind.UPDATED.value == "updated"
     assert SecretChangeKind.HOSTS_UPDATED.value == "hosts updated"
+    assert ModificationDisposition.PENDING.value == "pending"
     assert ModificationDisposition.REQUIRES_RESTART.value == "requires restart"
     assert ResourceKind.CPUS.value == "cpus"
     assert ResourceConvergenceState.GUEST_REFUSED.value == "guest-refused"
