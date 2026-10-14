@@ -76,14 +76,13 @@ pub use sandbox::ssh::{
     SshClient, SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer,
     SshServerOptionsBuilder, SshStdioStream,
 };
-#[cfg(feature = "local")]
+#[cfg(any(feature = "local", feature = "cloud"))]
 pub use sandbox::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
-    ResourceResizeStatus, SandboxMetricsReport, SandboxMetricsState, SandboxModificationBuilder,
-    SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind, SecretModificationPatch,
-    SecretPatchBuilder, SecretPlannedChange, SecretSource, all_sandbox_metrics,
-    all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
+    ResourceResizeStatus, SandboxModificationBuilder, SandboxModificationPatch,
+    SandboxModificationPlan, SecretChangeKind, SecretModificationPatch, SecretPatchBuilder,
+    SecretPlannedChange, SecretSource,
 };
 #[cfg(feature = "net")]
 pub use sandbox::{
@@ -99,6 +98,11 @@ pub use sandbox::{
     SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxSpecPatch, SandboxTouchResult,
     VsockSpecPatch, validate_sandbox_name,
 };
+#[cfg(feature = "local")]
+pub use sandbox::{
+    SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics, all_sandbox_metrics_local,
+    all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
+};
 pub use snapshot::{
     CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts,
     Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotConfig, SnapshotCopyBuilder,
@@ -108,3 +112,32 @@ pub use snapshot::{
 };
 pub use storage::{Storage, StorageCategoryUsage, StorageItemUsage, StorageUsage};
 pub use volume::{Volume, VolumeConfig, VolumeHandle, VolumeKind, VolumeSpec};
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+/// The secret planner in `microsandbox_types::secret_plan` is not SDK API: the plan types are,
+/// the planner is not.
+///
+/// ```
+/// fn applied(plan: &microsandbox::SandboxModificationPlan) -> bool {
+///     plan.applied
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use microsandbox::secret_plan;
+/// ```
+///
+/// ```compile_fail
+/// use microsandbox::SecretPlanInput;
+/// ```
+///
+/// ```compile_fail
+/// fn refusal_reason(plan: &microsandbox::SandboxModificationPlan) -> Option<String> {
+///     plan.refusal_reason()
+/// }
+/// ```
+#[cfg(doctest)]
+pub struct SecretPlanIsNotUserApi;
