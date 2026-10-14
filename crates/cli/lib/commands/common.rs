@@ -3004,6 +3004,20 @@ fn parse_published_port_range(
     }
 }
 
+/// Shell-quote a string, using single quotes only when necessary.
+pub(crate) fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars().all(|c| {
+        c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '+' | '@' | ',')
+    }) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
 /// Parse `--secret ENV[:OPTIONS]@HOST[,HOST...]` for `command`.
 ///
 /// The value is NOT read here: the CLI records a host-side source reference

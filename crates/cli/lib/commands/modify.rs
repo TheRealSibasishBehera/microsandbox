@@ -786,7 +786,7 @@ fn replayed_args(args: &ModifyArgs) -> String {
     for secret in &args.secrets {
         // Only accepted flags are echoed; parsing rejects inline values.
         let sanitized = match common::parse_secret(secret, "modify") {
-            Ok(_) => shell_quote(secret),
+            Ok(_) => common::shell_quote(secret),
             Err(_) => "<secret>".to_string(),
         };
         rendered.push(format!("--secret {sanitized}"));
@@ -806,23 +806,6 @@ fn replayed_args(args: &ModifyArgs) -> String {
         String::new()
     } else {
         format!("{} ", rendered.join(" "))
-    }
-}
-
-/// Single-quote `value` for a POSIX shell unless it holds only safe characters.
-fn shell_quote(value: &str) -> String {
-    let safe = !value.is_empty()
-        && value.chars().all(|ch| {
-            ch.is_ascii_alphanumeric()
-                || matches!(
-                    ch,
-                    '_' | '-' | '.' | ',' | ':' | '@' | '/' | '=' | '%' | '+'
-                )
-        });
-    if safe {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
