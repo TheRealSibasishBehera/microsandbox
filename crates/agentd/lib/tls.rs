@@ -346,4 +346,22 @@ mod tests {
         assert_eq!(fs::read_to_string(&bundle).unwrap(), "OLD CERTS\nNEW CA\n");
         let _ = fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn replace_file_does_not_write_through_a_link_at_the_temp_path() {
+        let root = bundle_test_root("stale-temp");
+        let bundle = root.join("bundle.crt");
+        let other = root.join("other");
+        let temp = root.join(".bundle.crt.msb-tmp");
+        fs::write(&bundle, "OLD CERTS\n").unwrap();
+        fs::write(&other, "UNTOUCHED").unwrap();
+        std::os::unix::fs::symlink(&other, &temp).unwrap();
+
+        replace_file(&bundle, "NEW CERTS\n").unwrap();
+
+        assert_eq!(fs::read_to_string(&bundle).unwrap(), "NEW CERTS\n");
+        assert_eq!(fs::read_to_string(&other).unwrap(), "UNTOUCHED");
+        assert!(fs::symlink_metadata(&temp).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
 }
