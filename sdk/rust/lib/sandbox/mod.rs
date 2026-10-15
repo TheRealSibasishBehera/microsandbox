@@ -1693,20 +1693,18 @@ pub(crate) fn hostname_from_sandbox_name(name: &str) -> String {
 /// use a reserved prefix. Values may be empty.
 pub(crate) fn validate_labels(labels: &BTreeMap<String, String>) -> MicrosandboxResult<()> {
     for key in labels.keys() {
-        if let Some(message) = label_key_validation_message(key) {
-            return Err(crate::MicrosandboxError::InvalidConfig(message));
+        if key.is_empty() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "label key must not be empty".into(),
+            ));
+        }
+        if let Some(prefix) = reserved_label_prefix(key) {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "label key '{key}' uses reserved prefix '{prefix}'"
+            )));
         }
     }
     Ok(())
-}
-
-/// Describe why a user-defined label key is invalid, if it is.
-pub(crate) fn label_key_validation_message(key: &str) -> Option<String> {
-    if key.is_empty() {
-        return Some("label key must not be empty".into());
-    }
-    reserved_label_prefix(key)
-        .map(|prefix| format!("label key '{key}' uses reserved prefix '{prefix}'"))
 }
 
 /// Validate sandbox environment variables.

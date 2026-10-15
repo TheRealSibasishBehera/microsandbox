@@ -1,6 +1,9 @@
 //! Sandbox modification planning.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use microsandbox_types::{
     EnvVar, RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction,
@@ -17,7 +20,7 @@ use microsandbox_control_client::{
     GrowRootDisk, SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
 };
 
-use super::{SandboxConfig, SandboxStatus, label_key_validation_message};
+use super::{SandboxConfig, SandboxStatus};
 
 #[path = "modify_ports.rs"]
 mod ports;
@@ -2343,7 +2346,9 @@ fn push_spec_conflicts(
     for (key, _) in &patch.labels {
         // Same key rules as create. Removal is not checked, so a sandbox that
         // already holds such a key can be repaired.
-        if let Some(message) = label_key_validation_message(key) {
+        if let Err(crate::MicrosandboxError::InvalidConfig(message)) =
+            super::validate_labels(&BTreeMap::from([(key.clone(), String::new())]))
+        {
             conflicts.push(ModificationConflict {
                 field: LABEL_FIELD.to_string(),
                 message,
