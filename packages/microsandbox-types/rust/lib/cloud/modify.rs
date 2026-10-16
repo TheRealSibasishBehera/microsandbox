@@ -3,7 +3,7 @@
 //! Plan requests are value-free; only the apply request carries plaintext,
 //! inside [`CloudSecretValue`]. The server decides which changes it supports.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use zeroize::Zeroizing;
 
 use super::{CloudHostPattern, CloudViolationAction};
@@ -72,7 +72,11 @@ pub struct CloudSecretPlanEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_hosts: Option<Vec<CloudHostPattern>>,
     /// New substitution locations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_strict_substitution"
+    )]
     pub substitution: Option<SecretSubstitution>,
     /// New hosts allowed to receive the placeholder unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,7 +144,11 @@ pub struct CloudSecretApplyEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_hosts: Option<Vec<CloudHostPattern>>,
     /// New substitution locations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_strict_substitution"
+    )]
     pub substitution: Option<SecretSubstitution>,
     /// New hosts allowed to receive the placeholder unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +170,18 @@ pub struct CloudSecretApplyEntry {
 #[cfg_attr(feature = "utoipa", schema(value_type = String))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudSecretValue(#[cfg_attr(feature = "ts", ts(type = "string"))] Zeroizing<String>);
+
+/// [`SecretSubstitution`] as a modification request reads it. Unknown fields
+/// are refused, so a misspelled restriction such as `header_field` cannot
+/// fall back to the default and widen where the secret is substituted.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct StrictSecretSubstitution {
+    headers: bool,
+    header_fields: Vec<String>,
+    query: bool,
+    body: bool,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Types: Rejection
@@ -377,6 +397,42 @@ impl std::fmt::Debug for CloudSecretValue {
 impl From<Zeroizing<String>> for CloudSecretValue {
     fn from(value: Zeroizing<String>) -> Self {
         Self(value)
+    }
+}
+
+/// Defaults come from [`SecretSubstitution`], so an omitted field means what
+/// it means at create.
+impl Default for StrictSecretSubstitution {
+    fn default() -> Self {
+        let SecretSubstitution {
+            headers,
+            header_fields,
+            query,
+            body,
+        } = SecretSubstitution::default();
+        Self {
+            headers,
+            header_fields,
+            query,
+            body,
+        }
+    }
+}
+
+impl From<StrictSecretSubstitution> for SecretSubstitution {
+    fn from(strict: StrictSecretSubstitution) -> Self {
+        let StrictSecretSubstitution {
+            headers,
+            header_fields,
+            query,
+            body,
+        } = strict;
+        Self {
+            headers,
+            header_fields,
+            query,
+            body,
+        }
     }
 }
 
@@ -603,6 +659,16 @@ fn create_rules(name: &str, placeholder: &str, index: usize) -> Result<(), Secre
     .validate(index)
 }
 
+fn deserialize_strict_substitution<'de, D>(
+    deserializer: D,
+) -> Result<Option<SecretSubstitution>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let strict = Option::<StrictSecretSubstitution>::deserialize(deserializer)?;
+    Ok(strict.map(SecretSubstitution::from))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -815,6 +881,69 @@ mod tests {
         let parsed: CloudSandboxModificationApplyRequest =
             serde_json::from_value(json!({})).unwrap();
         assert!(parsed.secrets.is_empty() && parsed.secrets_remove.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_substitution_field_is_refused() {
+        let misspelled = json!({"headers": true, "header_field": ["Authorization"]});
+
+        let plan = serde_json::from_value::<CloudSandboxModificationPlanRequest>(json!({
+            "secrets": [{
+                "name": "API_KEY",
+                "material": {"type": "absent"},
+                "substitution": misspelled,
+            }],
+        }));
+        let apply = serde_json::from_value::<CloudSandboxModificationApplyRequest>(json!({
+            "secrets": [{"name": "API_KEY", "substitution": misspelled}],
+        }));
+
+        for error in [plan.unwrap_err(), apply.unwrap_err()] {
+            assert!(error.to_string().contains("header_field"), "{error}");
+        }
+    }
+
+    #[test]
+    fn an_absent_null_or_empty_substitution_is_read_as_before() {
+        let read = |substitution: Option<Value>| {
+            let mut plan_secret = json!({"name": "API_KEY", "material": {"type": "absent"}});
+            let mut apply_secret = json!({"name": "API_KEY"});
+            if let Some(substitution) = substitution {
+                plan_secret["substitution"] = substitution.clone();
+                apply_secret["substitution"] = substitution;
+            }
+
+            let plan: CloudSandboxModificationPlanRequest =
+                serde_json::from_value(json!({"secrets": [plan_secret]})).unwrap();
+            let apply: CloudSandboxModificationApplyRequest =
+                serde_json::from_value(json!({"secrets": [apply_secret]})).unwrap();
+
+            let plan = serde_json::to_value(&plan.secrets[0].substitution).unwrap();
+            let apply = serde_json::to_value(&apply.secrets[0].substitution).unwrap();
+            assert_eq!(plan, apply);
+            plan
+        };
+
+        assert_eq!(read(None), Value::Null);
+        assert_eq!(read(Some(Value::Null)), Value::Null);
+        assert_eq!(
+            read(Some(json!({}))),
+            serde_json::to_value(SecretSubstitution::default()).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_omitted_substitution_field_takes_the_create_default() {
+        let parsed: CloudSandboxModificationApplyRequest = serde_json::from_value(json!({
+            "secrets": [{"name": "API_KEY", "substitution": {"query": true}}],
+        }))
+        .unwrap();
+
+        let substitution = parsed.secrets[0].substitution.as_ref().unwrap();
+        assert!(substitution.headers);
+        assert!(substitution.header_fields.is_empty());
+        assert!(substitution.query);
+        assert!(!substitution.body);
     }
 
     //----------------------------------------------------------------------------------------------
