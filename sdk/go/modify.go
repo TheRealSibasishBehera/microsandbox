@@ -101,9 +101,7 @@ type PortEndpoint struct {
 // the secret material; setting more than one is rejected before the request
 // crosses into the core.
 //
-// Zero-valued fields keep the stored setting. Changing Substitution,
-// AllowPlaceholderFor, ViolationAction, or RequireTLSIdentity on a running
-// sandbox needs ModificationPolicyRestart or ModificationPolicyNextStart.
+// Zero-valued fields keep the stored setting.
 type SecretModifySpec struct {
 	// Env resolves the value from a host environment variable at apply time.
 	Env string
@@ -122,25 +120,16 @@ type SecretModifySpec struct {
 	// existing secret's hosts unchanged; a new secret needs at least one.
 	AllowedHosts []string
 
-	// Substitution replaces the secret's whole substitution rule; nil keeps
-	// the stored rule. Unset fields of a supplied value take the create
-	// defaults: nil Headers means true, and an empty HeaderFields means every
-	// header field.
+	// Substitution replaces the secret's whole substitution rule.
 	Substitution *SecretSubstitution
 
-	// AllowPlaceholderFor sets the hosts that may receive the unchanged
-	// placeholder where substitution does not apply. Empty keeps the stored
-	// hosts, so they can be replaced but not cleared.
+	// AllowPlaceholderFor sets the hosts that may receive the unchanged placeholder.
 	AllowPlaceholderFor []string
 
 	// ViolationAction sets this secret's blocking action.
-	// ViolationActionDefault keeps the stored action, so a per-secret action
-	// can be replaced but not reset to the sandbox-level default.
 	ViolationAction ViolationAction
 
-	// RequireTLSIdentity sets whether substitution requires a verified TLS
-	// identity; nil keeps the stored setting. False is weaker and not
-	// recommended.
+	// RequireTLSIdentity sets whether substitution requires verified TLS identity.
 	RequireTLSIdentity *bool
 }
 
@@ -260,7 +249,6 @@ func requireModifyCapabilities(opts ModifyOptions) error {
 }
 
 // secretPolicyRequested reports whether any secret spec sets a policy field.
-// A library without the marker may decode these fields yet skip policy-only edits.
 func secretPolicyRequested(opts ModifyOptions) bool {
 	for _, spec := range opts.Secrets {
 		if spec.Substitution != nil ||

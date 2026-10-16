@@ -635,17 +635,6 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
     Policy: m.ModificationPolicyRestart,
 })
 
-// Substitute only in the Authorization header; a policy edit needs a restart
-_, err = sb.Modify(ctx, m.ModifyOptions{
-    Secrets: map[string]m.SecretModifySpec{
-        "API_KEY": {
-            Substitution:    &m.SecretSubstitution{HeaderFields: []string{"authorization"}},
-            ViolationAction: m.ViolationActionBlockAndTerminate,
-        },
-    },
-    Policy: m.ModificationPolicyRestart,
-})
-
 // Remove an existing secret
 _, err = sb.Modify(ctx, m.ModifyOptions{
     SecretsRemove: []string{"OLD_API_KEY"},
@@ -658,7 +647,9 @@ Plan or apply a configuration change. The returned plan labels each change `"liv
 
 `CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`Env`, `Value`, or `Store`) and may also set `Placeholder`, `AllowedHosts`, and the policy fields `Substitution`, `AllowPlaceholderFor`, `ViolationAction`, and `RequireTLSIdentity`; omitting a source updates only the other supplied fields. A policy change on a running sandbox needs `ModificationPolicyRestart` or `ModificationPolicyNextStart`. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`Env`, `Value`, or `Store`) and may also set `Placeholder`, `AllowedHosts`, and the settings listed under [`SecretModifySpec`](#secretmodifyspec); omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
+
+Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `ModificationPolicyRestart` to apply now, or `ModificationPolicyNextStart` to save for the next start.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -2925,7 +2916,7 @@ Compute the plan without applying anything
 
 <p className="msb-backref">Used by <a href="#sb-modify">Modify()</a></p>
 
-Desired state for one secret. `Env`, `Value`, and `Store` are mutually exclusive sources. Leave all three empty to update only the supplied placeholder, host, or policy fields. Zero-valued fields keep the stored setting.
+Desired state for one secret. `Env`, `Value`, and `Store` are mutually exclusive sources. Leave all three empty to update only the other supplied fields. Zero-valued fields keep the stored setting.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2934,10 +2925,10 @@ Desired state for one secret. `Env`, `Value`, and `Store` are mutually exclusive
 | Store | `string` | Reserved for a host-side secret store reference; currently unsupported |
 | Placeholder | `string` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
 | AllowedHosts | `[]string` | Desired allowed host patterns. A new secret requires at least one; an empty slice leaves existing hosts unchanged |
-| Substitution | [`*SecretSubstitution`](/sdk/go/secrets#secretsubstitutionstruct) | Replaces the whole substitution rule; `nil` keeps the stored rule. Unset fields take the create defaults: `nil` `Headers` means `true`, and an empty `HeaderFields` means every header field. New secrets default to every header |
-| AllowPlaceholderFor | `[]string` | Hosts permitted to receive the unchanged placeholder. A non-empty slice replaces the stored hosts; an empty slice leaves them unchanged, so they cannot be cleared |
-| ViolationAction | [`ViolationAction`](/sdk/go/secrets#violationactionstring-enum) | Per-secret blocking action. `ViolationActionDefault` keeps the stored action, so an override cannot be reset to the sandbox-level default |
-| RequireTLSIdentity | `*bool` | Whether substitution requires a verified TLS identity. `nil` keeps the stored setting; new secrets default to `true`. `false` is weaker and not recommended |
+| Substitution | [`*SecretSubstitution`](/sdk/go/secrets#secretsubstitutionstruct) | Desired substitution locations. A non-`nil` value replaces the stored rule; `nil` keeps it. New secrets default to headers only |
+| AllowPlaceholderFor | `[]string` | Hosts permitted to receive the unchanged placeholder. A non-empty slice replaces the stored hosts; an empty slice leaves them unchanged |
+| ViolationAction | [`ViolationAction`](/sdk/go/secrets#violationactionstring-enum) | Per-secret blocking action. `ViolationActionDefault` keeps the stored action |
+| RequireTLSIdentity | `*bool` | Whether substitution requires verified TLS identity. `nil` keeps the stored setting; new secrets default to `true`. `false` disables this requirement |
 
 ### SandboxModificationPlan
 

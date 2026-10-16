@@ -2687,9 +2687,8 @@ export interface SecretEntry {
  * provide the secret material; setting more than one is rejected at the
  * boundary. Only `value` may carry raw secret material.
  *
- * Omitted policy fields keep the stored setting. A supplied `substitution`
- * replaces the whole rule, with omitted locations taking the create
- * defaults. `allowPlaceholderFor` sets the passthrough hosts.
+ * Omitted policy fields keep the stored setting; a supplied `substitution`
+ * replaces the whole rule.
  */
 export interface SecretModifySpec {
   env?: string
@@ -2705,7 +2704,7 @@ export interface SecretModifySpec {
 
 /**
  * Substitution locations in `SecretModifySpec.substitution`. Omitted fields
- * take the create defaults: headers on, every header field, no query, no body.
+ * take the create defaults.
  */
 export interface SecretModifySubstitution {
   headers?: boolean

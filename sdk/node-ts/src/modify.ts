@@ -105,11 +105,8 @@ export interface ModifyPort extends ModifyPortEndpoint {
  * Only `value` may carry raw secret material, and it never appears in the
  * returned plan.
  *
- * Omitted fields, and an empty `allowedHosts` or `allowPlaceholderFor`, keep
- * the stored setting. Changing `substitution`, `violationAction`,
- * `requireTlsIdentity`, or `allowPlaceholderFor` on a running sandbox needs
- * `policy: "restart"` or `"next_start"`. Keys outside this interface are
- * rejected.
+ * Omitted policy fields keep the stored setting. Unknown keys, here or in
+ * `substitution`, are rejected.
  */
 export interface SecretModifySpec {
   /** Resolve the value from this host environment variable at apply time. */
@@ -126,23 +123,15 @@ export interface SecretModifySpec {
    */
   allowedHosts?: string[];
   /**
-   * Request locations where the placeholder is substituted. A supplied value
-   * replaces the whole stored rule: omitted locations take the create
-   * defaults (headers on, no query, no body), and omitting `headerFields` or
-   * passing `[]` means every header.
+   * Request locations for substitution. A supplied value replaces the whole
+   * rule; omitted locations take their defaults.
    */
   substitution?: SecretSubstitution;
-  /** Per-secret action for a disallowed placeholder. Can be set but not cleared. */
+  /** Per-secret blocking action. */
   violationAction?: ViolationAction;
-  /**
-   * Whether substitution requires a verified TLS identity. `false` also
-   * substitutes over plain HTTP, which is weaker and not recommended.
-   */
+  /** Whether substitution requires verified TLS identity. */
   requireTlsIdentity?: boolean;
-  /**
-   * Hosts allowed to receive the placeholder unchanged. A non-empty list
-   * replaces the stored hosts; the list can be set but not cleared.
-   */
+  /** Hosts allowed to receive the unchanged placeholder; empty leaves them unchanged. */
   allowPlaceholderFor?: string[];
 }
 
@@ -185,10 +174,7 @@ function usesSecretPolicyFields(opts?: ModifyOptions): boolean {
   );
 }
 
-/**
- * The native boundary ignores keys it does not declare, so a misspelled or
- * unsupported key would otherwise succeed and store the default.
- */
+/** Native code drops undeclared keys silently, so a misspelled key must fail here. */
 function rejectUnknownSecretKeys(secrets: Record<string, SecretModifySpec>): void {
   for (const [name, spec] of Object.entries(secrets)) {
     rejectUnknownKeys(name, spec, SECRET_SPEC_KEYS, "");
