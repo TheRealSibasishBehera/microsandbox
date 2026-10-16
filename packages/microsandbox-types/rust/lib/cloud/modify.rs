@@ -261,6 +261,27 @@ pub enum CloudModificationRejection {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: Projection
+//--------------------------------------------------------------------------------------------------
+
+/// A patch a Cloud request can express: each secret with its metadata, and
+/// the names to remove.
+struct ProjectedPatch<'a> {
+    secrets: Vec<(&'a SecretModificationPatch, SecretMetadata)>,
+    secrets_remove: Vec<String>,
+}
+
+/// Metadata shared by the plan entry and the apply entry.
+struct SecretMetadata {
+    placeholder: Option<String>,
+    allowed_hosts: Option<Vec<CloudHostPattern>>,
+    substitution: Option<SecretSubstitution>,
+    passthrough_hosts: Option<Vec<CloudHostPattern>>,
+    violation_action: Option<CloudViolationAction>,
+    require_tls_identity: Option<bool>,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
@@ -384,6 +405,38 @@ impl CloudSecretValue {
     }
 }
 
+impl SecretMetadata {
+    fn into_plan_entry(self, name: String, material: CloudSecretMaterial) -> CloudSecretPlanEntry {
+        CloudSecretPlanEntry {
+            name,
+            material,
+            placeholder: self.placeholder,
+            allowed_hosts: self.allowed_hosts,
+            substitution: self.substitution,
+            passthrough_hosts: self.passthrough_hosts,
+            violation_action: self.violation_action,
+            require_tls_identity: self.require_tls_identity,
+        }
+    }
+
+    fn into_apply_entry(
+        self,
+        name: String,
+        value: Option<CloudSecretValue>,
+    ) -> CloudSecretApplyEntry {
+        CloudSecretApplyEntry {
+            name,
+            value,
+            placeholder: self.placeholder,
+            allowed_hosts: self.allowed_hosts,
+            substitution: self.substitution,
+            passthrough_hosts: self.passthrough_hosts,
+            violation_action: self.violation_action,
+            require_tls_identity: self.require_tls_identity,
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -439,55 +492,6 @@ impl From<StrictSecretSubstitution> for SecretSubstitution {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
-
-/// A patch a Cloud request can express: each secret with its metadata, and
-/// the names to remove.
-struct ProjectedPatch<'a> {
-    secrets: Vec<(&'a SecretModificationPatch, SecretMetadata)>,
-    secrets_remove: Vec<String>,
-}
-
-/// Metadata shared by the plan entry and the apply entry.
-struct SecretMetadata {
-    placeholder: Option<String>,
-    allowed_hosts: Option<Vec<CloudHostPattern>>,
-    substitution: Option<SecretSubstitution>,
-    passthrough_hosts: Option<Vec<CloudHostPattern>>,
-    violation_action: Option<CloudViolationAction>,
-    require_tls_identity: Option<bool>,
-}
-
-impl SecretMetadata {
-    fn into_plan_entry(self, name: String, material: CloudSecretMaterial) -> CloudSecretPlanEntry {
-        CloudSecretPlanEntry {
-            name,
-            material,
-            placeholder: self.placeholder,
-            allowed_hosts: self.allowed_hosts,
-            substitution: self.substitution,
-            passthrough_hosts: self.passthrough_hosts,
-            violation_action: self.violation_action,
-            require_tls_identity: self.require_tls_identity,
-        }
-    }
-
-    fn into_apply_entry(
-        self,
-        name: String,
-        value: Option<CloudSecretValue>,
-    ) -> CloudSecretApplyEntry {
-        CloudSecretApplyEntry {
-            name,
-            value,
-            placeholder: self.placeholder,
-            allowed_hosts: self.allowed_hosts,
-            substitution: self.substitution,
-            passthrough_hosts: self.passthrough_hosts,
-            violation_action: self.violation_action,
-            require_tls_identity: self.require_tls_identity,
-        }
-    }
-}
 
 /// Refuse any patch a Cloud request cannot express, then extract each secret's
 /// metadata. The caller handles material, which differs for dry run and apply.
