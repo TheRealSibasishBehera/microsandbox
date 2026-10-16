@@ -2559,47 +2559,7 @@ fn apply_network_opts(
     // Secrets. `create` persists a host-side source reference, not the raw
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
-    let mut secret_specs: Vec<ParsedSecret> = Vec::new();
-    for secret_str in &opts.secret {
-        let parsed = parse_secret(secret_str, "create")?;
-        match secret_specs
-            .iter_mut()
-            .find(|existing| existing.env_var == parsed.env_var)
-        {
-            Some(existing) => {
-                extend_unique(&mut existing.allowed_hosts, parsed.allowed_hosts);
-                extend_unique(&mut existing.passthrough_hosts, parsed.passthrough_hosts);
-                if let Some(parsed_rule) = parsed.substitution {
-                    match existing.substitution.as_mut() {
-                        Some(rule) => {
-                            rule.headers &= parsed_rule.headers;
-                            if rule.headers {
-                                match intersect_header_fields(
-                                    &rule.header_fields,
-                                    &parsed_rule.header_fields,
-                                ) {
-                                    Some(merged) => rule.header_fields = merged,
-                                    None => {
-                                        // The scopes share no field: the empty allowlist is
-                                        // equivalent to disabling header substitution and
-                                        // must not fall back to substituting in every header.
-                                        rule.headers = false;
-                                        rule.header_fields.clear();
-                                    }
-                                }
-                            } else {
-                                rule.header_fields.clear();
-                            }
-                            rule.query |= parsed_rule.query;
-                            rule.body |= parsed_rule.body;
-                        }
-                        None => existing.substitution = Some(parsed_rule),
-                    }
-                }
-            }
-            None => secret_specs.push(parsed),
-        }
-    }
+    let secret_specs = merge_secrets(&opts.secret, "create")?;
     for secret in secret_specs {
         let env_var = secret.env_var;
         let source = microsandbox::sandbox::SecretSource::Env {
@@ -3214,6 +3174,56 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
     Ok(parsed)
 }
 
+/// Parse `--secret` flags and group them by name, so repeated
+/// `--secret NAME@HOST[,HOST...]` flags accumulate into one spec per name.
+///
+/// A flag without a substitution option leaves the other flags' rule as it is.
+/// Two rules combine: header scopes intersect (disjoint scopes disable header
+/// substitution), and query or body substitution is on when either enables it.
+pub(crate) fn merge_secrets(
+    secrets: &[String],
+    command: &str,
+) -> anyhow::Result<Vec<ParsedSecret>> {
+    let mut specs: Vec<ParsedSecret> = Vec::new();
+    for secret in secrets {
+        let parsed = parse_secret(secret, command)?;
+        let Some(existing) = specs
+            .iter_mut()
+            .find(|existing| existing.env_var == parsed.env_var)
+        else {
+            specs.push(parsed);
+            continue;
+        };
+        extend_unique(&mut existing.allowed_hosts, parsed.allowed_hosts);
+        extend_unique(&mut existing.passthrough_hosts, parsed.passthrough_hosts);
+        let Some(parsed_rule) = parsed.substitution else {
+            continue;
+        };
+        let Some(rule) = existing.substitution.as_mut() else {
+            existing.substitution = Some(parsed_rule);
+            continue;
+        };
+        rule.headers &= parsed_rule.headers;
+        if rule.headers {
+            match intersect_header_fields(&rule.header_fields, &parsed_rule.header_fields) {
+                Some(merged) => rule.header_fields = merged,
+                None => {
+                    // The scopes share no field: the empty allowlist is
+                    // equivalent to disabling header substitution and must not
+                    // fall back to substituting in every header.
+                    rule.headers = false;
+                    rule.header_fields.clear();
+                }
+            }
+        } else {
+            rule.header_fields.clear();
+        }
+        rule.query |= parsed_rule.query;
+        rule.body |= parsed_rule.body;
+    }
+    Ok(specs)
+}
+
 /// Split comma-separated secret options while retaining bracketed host lists.
 fn split_secret_options(options: &str) -> anyhow::Result<Vec<String>> {
     let mut result = Vec::new();
@@ -3247,7 +3257,7 @@ fn split_secret_options(options: &str) -> anyhow::Result<Vec<String>> {
 /// the empty set, which this encoding cannot represent (an empty list means
 /// "all"); `None` is returned so the caller can disable header substitution,
 /// the equivalent of allowing no field, instead of widening to every header.
-pub(crate) fn intersect_header_fields(left: &[String], right: &[String]) -> Option<Vec<String>> {
+fn intersect_header_fields(left: &[String], right: &[String]) -> Option<Vec<String>> {
     if left.is_empty() {
         return Some(right.to_vec());
     }

@@ -317,7 +317,7 @@ fn apply_secret_args(
     mut builder: SandboxModificationBuilder,
     args: &ModifyArgs,
 ) -> anyhow::Result<SandboxModificationBuilder> {
-    for spec in merge_secret_specs(&args.secrets)? {
+    for spec in common::merge_secrets(&args.secrets, "modify")? {
         let name = spec.env_var;
         builder = builder.secret(|mut s| {
             s = s.env(&name).source(SecretSource::Env { var: name.clone() });
@@ -340,61 +340,6 @@ fn apply_secret_args(
     }
 
     Ok(builder)
-}
-
-/// Group `--secret` flags by name so repeated `--secret NAME@HOST[,HOST...]`
-/// flags accumulate into one declarative spec per name.
-fn merge_secret_specs(secrets: &[String]) -> anyhow::Result<Vec<common::ParsedSecret>> {
-    let mut specs: Vec<common::ParsedSecret> = Vec::new();
-    for secret in secrets {
-        let parsed = common::parse_secret(secret, "modify")?;
-        match specs
-            .iter_mut()
-            .find(|existing| existing.env_var == parsed.env_var)
-        {
-            Some(existing) => {
-                for host in parsed.allowed_hosts {
-                    if !existing.allowed_hosts.contains(&host) {
-                        existing.allowed_hosts.push(host);
-                    }
-                }
-                for host in parsed.passthrough_hosts {
-                    if !existing.passthrough_hosts.contains(&host) {
-                        existing.passthrough_hosts.push(host);
-                    }
-                }
-                if let Some(parsed_rule) = parsed.substitution {
-                    match existing.substitution.as_mut() {
-                        Some(rule) => {
-                            rule.headers &= parsed_rule.headers;
-                            if rule.headers {
-                                match common::intersect_header_fields(
-                                    &rule.header_fields,
-                                    &parsed_rule.header_fields,
-                                ) {
-                                    Some(merged) => rule.header_fields = merged,
-                                    None => {
-                                        // The scopes share no field: the empty allowlist is
-                                        // equivalent to disabling header substitution and
-                                        // must not fall back to substituting in every header.
-                                        rule.headers = false;
-                                        rule.header_fields.clear();
-                                    }
-                                }
-                            } else {
-                                rule.header_fields.clear();
-                            }
-                            rule.query |= parsed_rule.query;
-                            rule.body |= parsed_rule.body;
-                        }
-                        None => existing.substitution = Some(parsed_rule),
-                    }
-                }
-            }
-            None => specs.push(parsed),
-        }
-    }
-    Ok(specs)
 }
 
 fn print_plan(plan: &SandboxModificationPlan, json: bool) -> anyhow::Result<()> {
@@ -976,7 +921,7 @@ mod tests {
 
     fn merged_secrets(flags: &[&str]) -> Vec<common::ParsedSecret> {
         let flags = flags.iter().map(ToString::to_string).collect::<Vec<_>>();
-        merge_secret_specs(&flags).unwrap()
+        common::merge_secrets(&flags, "modify").unwrap()
     }
 
     /// `(headers, header_fields, query, body)`; `SecretSubstitution` has no `PartialEq`.
