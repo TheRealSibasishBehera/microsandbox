@@ -318,12 +318,12 @@ fn apply_secret_args(
     args: &ModifyArgs,
 ) -> anyhow::Result<SandboxModificationBuilder> {
     for spec in merge_secret_specs(&args.secrets)? {
-        let substitution = secret_substitution(&spec);
         let name = spec.env_var;
         builder = builder.secret(|mut s| {
             s = s.env(&name).source(SecretSource::Env { var: name.clone() });
-            if let Some(substitution) = substitution {
-                s = s.substitution(substitution);
+            // `None` keeps the secret's current rule.
+            if let Some(rule) = spec.substitution {
+                s = s.substitution(rule);
             }
             for host in spec.allowed_hosts {
                 s = s.allow(host);
@@ -363,49 +363,38 @@ fn merge_secret_specs(secrets: &[String]) -> anyhow::Result<Vec<common::ParsedSe
                         existing.passthrough_hosts.push(host);
                     }
                 }
-                existing.substitute_headers &= parsed.substitute_headers;
-                if existing.substitute_headers {
-                    match common::intersect_header_fields(
-                        &existing.substitute_header_fields,
-                        &parsed.substitute_header_fields,
-                    ) {
-                        Some(merged) => existing.substitute_header_fields = merged,
-                        None => {
-                            // The scopes share no field: the empty allowlist is
-                            // equivalent to disabling header substitution and
-                            // must not fall back to substituting in every header.
-                            existing.substitute_headers = false;
-                            existing.substitute_header_fields.clear();
+                if let Some(parsed_rule) = parsed.substitution {
+                    match existing.substitution.as_mut() {
+                        Some(rule) => {
+                            rule.headers &= parsed_rule.headers;
+                            if rule.headers {
+                                match common::intersect_header_fields(
+                                    &rule.header_fields,
+                                    &parsed_rule.header_fields,
+                                ) {
+                                    Some(merged) => rule.header_fields = merged,
+                                    None => {
+                                        // The scopes share no field: the empty allowlist is
+                                        // equivalent to disabling header substitution and
+                                        // must not fall back to substituting in every header.
+                                        rule.headers = false;
+                                        rule.header_fields.clear();
+                                    }
+                                }
+                            } else {
+                                rule.header_fields.clear();
+                            }
+                            rule.query |= parsed_rule.query;
+                            rule.body |= parsed_rule.body;
                         }
+                        None => existing.substitution = Some(parsed_rule),
                     }
-                } else {
-                    existing.substitute_header_fields.clear();
                 }
-                existing.substitute_query |= parsed.substitute_query;
-                existing.substitute_body |= parsed.substitute_body;
-                existing.substitution_specified |= parsed.substitution_specified;
             }
             None => specs.push(parsed),
         }
     }
     Ok(specs)
-}
-
-/// The substitution rule to send; `None` keeps the secret's current rule.
-fn secret_substitution(
-    spec: &common::ParsedSecret,
-) -> Option<microsandbox_types::SecretSubstitution> {
-    spec.substitution_specified
-        .then(|| microsandbox_types::SecretSubstitution {
-            headers: spec.substitute_headers,
-            header_fields: if spec.substitute_headers {
-                spec.substitute_header_fields.clone()
-            } else {
-                Vec::new()
-            },
-            query: spec.substitute_query,
-            body: spec.substitute_body,
-        })
 }
 
 fn print_plan(plan: &SandboxModificationPlan, json: bool) -> anyhow::Result<()> {
@@ -994,8 +983,14 @@ mod tests {
     type Rule = (bool, Vec<String>, bool, bool);
 
     fn sent_rule(spec: &common::ParsedSecret) -> Option<Rule> {
-        secret_substitution(spec)
-            .map(|rule| (rule.headers, rule.header_fields, rule.query, rule.body))
+        spec.substitution.as_ref().map(|rule| {
+            (
+                rule.headers,
+                rule.header_fields.clone(),
+                rule.query,
+                rule.body,
+            )
+        })
     }
 
     fn merged_substitution(flags: &[&str]) -> Option<Rule> {

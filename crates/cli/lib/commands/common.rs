@@ -20,6 +20,7 @@ use microsandbox_network::config::{PortProtocol, PublishedPort};
 use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
 #[cfg(feature = "net")]
 use microsandbox_types::NetworkRateLimitDirection;
+use microsandbox_types::SecretSubstitution;
 
 use crate::ui;
 
@@ -673,13 +674,8 @@ pub(crate) struct ParsedSecret {
     pub(crate) env_var: String,
     pub(crate) allowed_hosts: Vec<String>,
     pub(crate) passthrough_hosts: Vec<String>,
-    pub(crate) substitute_headers: bool,
-    /// When non-empty, restrict header substitution to these field names.
-    pub(crate) substitute_header_fields: Vec<String>,
-    pub(crate) substitute_query: bool,
-    pub(crate) substitute_body: bool,
-    /// Whether a substitution option was given.
-    pub(crate) substitution_specified: bool,
+    /// The substitution rule, or `None` when no substitution option was given.
+    pub(crate) substitution: Option<SecretSubstitution>,
 }
 
 /// Parsed public CLI mount options.
@@ -2573,26 +2569,33 @@ fn apply_network_opts(
             Some(existing) => {
                 extend_unique(&mut existing.allowed_hosts, parsed.allowed_hosts);
                 extend_unique(&mut existing.passthrough_hosts, parsed.passthrough_hosts);
-                existing.substitute_headers &= parsed.substitute_headers;
-                if existing.substitute_headers {
-                    match intersect_header_fields(
-                        &existing.substitute_header_fields,
-                        &parsed.substitute_header_fields,
-                    ) {
-                        Some(merged) => existing.substitute_header_fields = merged,
-                        None => {
-                            // The scopes share no field: the empty allowlist is
-                            // equivalent to disabling header substitution and
-                            // must not fall back to substituting in every header.
-                            existing.substitute_headers = false;
-                            existing.substitute_header_fields.clear();
+                if let Some(parsed_rule) = parsed.substitution {
+                    match existing.substitution.as_mut() {
+                        Some(rule) => {
+                            rule.headers &= parsed_rule.headers;
+                            if rule.headers {
+                                match intersect_header_fields(
+                                    &rule.header_fields,
+                                    &parsed_rule.header_fields,
+                                ) {
+                                    Some(merged) => rule.header_fields = merged,
+                                    None => {
+                                        // The scopes share no field: the empty allowlist is
+                                        // equivalent to disabling header substitution and
+                                        // must not fall back to substituting in every header.
+                                        rule.headers = false;
+                                        rule.header_fields.clear();
+                                    }
+                                }
+                            } else {
+                                rule.header_fields.clear();
+                            }
+                            rule.query |= parsed_rule.query;
+                            rule.body |= parsed_rule.body;
                         }
+                        None => existing.substitution = Some(parsed_rule),
                     }
-                } else {
-                    existing.substitute_header_fields.clear();
                 }
-                existing.substitute_query |= parsed.substitute_query;
-                existing.substitute_body |= parsed.substitute_body;
             }
             None => secret_specs.push(parsed),
         }
@@ -2602,17 +2605,18 @@ fn apply_network_opts(
         let source = microsandbox::sandbox::SecretSource::Env {
             var: env_var.clone(),
         };
+        let rule = secret.substitution.unwrap_or_default();
         builder = builder.secret(|mut s| {
             s = s.env(&env_var).source(source);
             // `substitute_in_header_fields` enables header substitution, so the
             // explicit enabled/disabled switch must be applied after it.
-            if !secret.substitute_header_fields.is_empty() {
-                s = s.substitute_in_header_fields(secret.substitute_header_fields.clone());
+            if !rule.header_fields.is_empty() {
+                s = s.substitute_in_header_fields(rule.header_fields);
             }
             s = s
-                .substitute_in_headers(secret.substitute_headers)
-                .substitute_in_query(secret.substitute_query)
-                .substitute_in_body(secret.substitute_body);
+                .substitute_in_headers(rule.headers)
+                .substitute_in_query(rule.query)
+                .substitute_in_body(rule.body);
             for host in secret.allowed_hosts {
                 s = allow_secret_host(s, &host);
             }
@@ -3083,11 +3087,7 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
         env_var: env_var.to_string(),
         allowed_hosts,
         passthrough_hosts: Vec::new(),
-        substitute_headers: true,
-        substitute_header_fields: Vec::new(),
-        substitute_query: false,
-        substitute_body: false,
-        substitution_specified: false,
+        substitution: None,
     };
     if let Some(options) = options {
         // `no-headers` and `headers=` express opposite header scopes and must
@@ -3103,16 +3103,22 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
                         );
                     }
                     headers_disabled = true;
-                    parsed.substitute_headers = false;
-                    parsed.substitution_specified = true;
+                    parsed
+                        .substitution
+                        .get_or_insert_with(SecretSubstitution::default)
+                        .headers = false;
                 }
                 "query" => {
-                    parsed.substitute_query = true;
-                    parsed.substitution_specified = true;
+                    parsed
+                        .substitution
+                        .get_or_insert_with(SecretSubstitution::default)
+                        .query = true;
                 }
                 "body" => {
-                    parsed.substitute_body = true;
-                    parsed.substitution_specified = true;
+                    parsed
+                        .substitution
+                        .get_or_insert_with(SecretSubstitution::default)
+                        .body = true;
                 }
                 value if value.starts_with("headers=") => {
                     if headers_disabled {
@@ -3163,14 +3169,16 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
                             "secret header scope requires at least one field name; use `headers=*` for all headers"
                         );
                     }
-                    parsed.substitute_headers = true;
-                    parsed.substitute_header_fields = if all_headers {
+                    let rule = parsed
+                        .substitution
+                        .get_or_insert_with(SecretSubstitution::default);
+                    rule.headers = true;
+                    rule.header_fields = if all_headers {
                         Vec::new()
                     } else {
                         parsed_fields
                     };
                     header_scope_selected = true;
-                    parsed.substitution_specified = true;
                 }
                 value if value.starts_with("passthrough=") => {
                     let hosts = value.trim_start_matches("passthrough=");
@@ -3195,7 +3203,11 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
             }
         }
     }
-    if !parsed.substitute_headers && !parsed.substitute_query && !parsed.substitute_body {
+    if parsed
+        .substitution
+        .as_ref()
+        .is_some_and(|rule| !rule.headers && !rule.query && !rule.body)
+    {
         anyhow::bail!("secret must enable at least one substitution location");
     }
 
@@ -3872,7 +3884,7 @@ mod tests {
 
         assert_eq!(secret.env_var, "MSB_PARSE_SECRET_TOKEN");
         assert_eq!(secret.allowed_hosts, vec!["api.example.com"]);
-        assert!(!secret.substitution_specified);
+        assert!(secret.substitution.is_none());
     }
 
     #[test]
@@ -3898,10 +3910,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!secret.substitute_headers);
-        assert!(secret.substitute_query);
-        assert!(secret.substitute_body);
-        assert!(secret.substitution_specified);
+        let rule = secret.substitution.as_ref().unwrap();
+        assert!(!rule.headers);
+        assert!(rule.query);
+        assert!(rule.body);
         assert_eq!(
             secret.passthrough_hosts,
             vec!["api.anthropic.com", "example.com", "*.example.org"]
@@ -3916,22 +3928,21 @@ mod tests {
             "create",
         )
         .unwrap();
-        assert!(secret.substitute_headers);
-        assert!(secret.substitution_specified);
-        assert_eq!(
-            secret.substitute_header_fields,
-            vec!["authorization", "x-api-key"]
-        );
+        let rule = secret.substitution.unwrap();
+        assert!(rule.headers);
+        assert_eq!(rule.header_fields, vec!["authorization", "x-api-key"]);
 
         // A single field does not require brackets.
         let single =
             parse_secret("API_KEY:headers=authorization@api.example.com", "create").unwrap();
-        assert_eq!(single.substitute_header_fields, vec!["authorization"]);
+        assert_eq!(
+            single.substitution.unwrap().header_fields,
+            vec!["authorization"]
+        );
 
         // `*` restores the default of every header.
         let all = parse_secret("API_KEY:headers=*@api.example.com", "create").unwrap();
-        assert!(all.substitute_header_fields.is_empty());
-        assert!(all.substitution_specified);
+        assert!(all.substitution.unwrap().header_fields.is_empty());
 
         // Mixing the wildcard with concrete field names must not silently widen
         // the scope to every header.
