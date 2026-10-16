@@ -607,7 +607,9 @@ Plan or apply a configuration change. The returned plan labels each change `"liv
 
 `cpus` and `memory` resize live within the [`maxCpus`](#sandboxbuilder-maxcpus) / [`maxMemory`](#sandboxbuilder-maxmemory) ceilings; raising a ceiling requires a restart. `rootDiskSize` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder`, `allowedHosts`, and the settings listed under [`SecretModifySpec`](#secretmodifyspec); omitting a source updates only the other supplied fields. Unknown keys are rejected. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
+
+Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `policy: "restart"` to apply now, or `policy: "next_start"` to save for the next start.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -2965,7 +2967,7 @@ Compute the plan without applying anything. Defaults to `false`
 
 <p className="msb-backref">Used by <a href="#sandbox-modify">modify()</a></p>
 
-Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the placeholder or allowed hosts.
+Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the other supplied fields.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2974,6 +2976,10 @@ Desired state for one secret. `env`, `value`, and `store` are mutually exclusive
 | store | `string` | Reserved for a host-side secret store reference; currently unsupported |
 | placeholder | `string` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
 | allowedHosts | `string[]` | Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged |
+| substitution | [`SecretSubstitution`](/sdk/typescript/secrets#secretsubstitution) | Desired substitution locations. A supplied value replaces the stored rule; omitted keys take the defaults (headers on, every header, no query or body), so repeat `headerFields` to keep a narrowed list. Omission keeps the stored rule; new secrets default to headers only |
+| violationAction | [`ViolationAction`](/sdk/typescript/secrets#violationaction) | Per-secret blocking action. Omission keeps the existing override |
+| requireTlsIdentity | `boolean` | Whether substitution requires verified TLS identity. Omission keeps the existing setting; new secrets default to `true`. Explicit `false` disables this requirement |
+| allowPlaceholderFor | `string[]` | Hosts permitted to receive the unchanged placeholder. A non-empty list replaces the existing hosts; an empty list leaves them unchanged |
 
 ### PullPolicy
 
