@@ -17,7 +17,7 @@ When a change takes effect depends on the setting:
 | Change | When it takes effect | Notes |
 | --- | --- | --- |
 | CPU and memory | Live, within the boot-time `max_*` ceilings | The VM and workload keep running |
-| Labels | Live with an active snapshot; otherwise restart or next start | Starting and paused require `next_start`; lists and filters update immediately |
+| Labels | Live | Host-side metadata; guest processes do not change |
 | Existing secret material or removal | Live | Adding a secret or changing its placeholder needs a restart |
 | Environment and workdir | Future execs | Processes that are already running keep their current values |
 | `max_cpus` and `max_memory` | Restart or next start | These ceilings are fixed when the VM boots |
@@ -72,7 +72,7 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-The result is a modification plan showing what changed and whether each change was applied. CPU and memory can take a moment to converge inside the guest. The new host limits and label are applied immediately, metrics attribution uses the label at the metrics collector's next sample, and the workload continues running.
+The result is a modification plan showing what changed and whether each change was applied. CPU and memory can take a moment to converge inside the guest. The new host limits and label take effect immediately, and the workload continues running.
 
 <span id="reserve-resize-headroom" />
 
@@ -200,7 +200,7 @@ The planner classifies every requested field before it changes anything:
 ### Resize CPU and memory
 
 <Frame>
-  <img src="/images/live-modify.svg" alt="A terminal changes CPU and memory and updates a host-side label while the sandbox remains running" />
+  <img src="/images/live-modify.svg" alt="A terminal changes CPU, memory, and a label while the sandbox remains running" />
 </Frame>
 
 Raise or lower CPU and memory while the workload runs:
@@ -240,7 +240,7 @@ Use [`msb ps`](/cli/sandbox-commands#msb-status) to see allocation as `effective
 
 ### Update labels
 
-Labels are host-side metadata, so adding, changing, or removing one on a running or draining sandbox with an active configuration snapshot is applied live:
+Labels are host-side metadata, so adding, changing, or removing one on a running sandbox is applied live:
 
 <CodeGroup>
 ```bash CLI
@@ -277,11 +277,9 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-Running guest processes do not change. The new labels are available immediately to listing and selection, and metrics attribution uses them at the metrics collector's next sample. Created, stopped, and crashed sandboxes save label changes for their next start; starting and paused sandboxes refuse them unless you use the `next_start` policy.
+Running guest processes do not change. Lists and label filters show the new labels immediately, and [`msb-metrics`](/observability/msb-metrics) tags usage with them from its next collection. With the `next_start` policy the labels are saved, but metrics and branches keep the old labels until the sandbox starts again.
 
-A running sandbox without an active configuration snapshot still needs a restart for label changes. This includes sandboxes started by v0.6.0 through v0.6.3 and the brief moment after a current start marks the sandbox running but before it saves the snapshot.
-
-With the explicit `next_start` policy, a running sandbox saves the labels without changing its active metadata. Lists and label filters use the saved labels immediately, while metrics attribution and branches keep the active labels until the next start.
+<Note>Sandboxes started by v0.6.3 or earlier need a restart for label changes.</Note>
 
 See [Labels](/sandboxes/labels) for naming and cardinality guidance.
 

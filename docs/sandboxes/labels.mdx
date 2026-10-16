@@ -98,11 +98,7 @@ msb modify worker --label tier=web --label-rm stale
 ```
 </CodeGroup>
 
-Running and draining sandboxes with an active configuration snapshot apply these host-side changes live. Lists and filters reflect them immediately, while metrics attribution uses them at the metrics collector's next sample. Created, stopped, and crashed sandboxes save them for the next start; starting and paused sandboxes refuse them unless you use the `next_start` policy.
-
-A running sandbox without an active configuration snapshot still needs a restart for label changes. This includes sandboxes started by v0.6.0 through v0.6.3 and the brief moment after a current start marks the sandbox running but before it saves the snapshot.
-
-Using the explicit `next_start` policy on a running sandbox updates lists and label filters immediately because they read the saved configuration. Metrics attribution and branches continue to use the active labels until the sandbox starts again.
+On a running sandbox these changes apply live; a stopped sandbox saves them for its next start. See [Update labels](/sandboxes/tuning#update-labels) for how lists, metrics, and the `next_start` policy pick them up.
 
 ## Select in bulk
 
