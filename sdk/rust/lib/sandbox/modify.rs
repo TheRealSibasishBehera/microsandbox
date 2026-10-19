@@ -10,7 +10,7 @@ use microsandbox_types::{
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
-use crate::backend::{Backend, ControlSession};
+use crate::backend::{Backend, ControlSession, sandbox::SandboxIdentity};
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
@@ -20,7 +20,7 @@ use microsandbox_control_client::{
     GrowRootDisk, SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
 };
 
-use super::{SandboxConfig, SandboxStatus};
+use super::{SandboxConfig, SandboxStatus, config::SharedSandboxConfig};
 
 #[path = "modify_ports.rs"]
 mod ports;
@@ -80,6 +80,14 @@ pub struct SandboxModificationBuilder {
     name: String,
     patch: SandboxModificationPatch,
     policy: ModificationPolicy,
+    refresh: Option<ConfigRefresh>,
+}
+
+/// The live [`Sandbox`](super::Sandbox) whose config a successful apply replaces.
+#[derive(Clone)]
+struct ConfigRefresh {
+    identity: SandboxIdentity,
+    config: SharedSandboxConfig,
 }
 
 /// Fluent builder for one declarative secret spec inside a modification
@@ -148,7 +156,18 @@ impl SandboxModificationBuilder {
             name: name.into(),
             patch: SandboxModificationPatch::default(),
             policy: ModificationPolicy::NoRestart,
+            refresh: None,
         }
+    }
+
+    /// Replace `config` with the saved config once apply has persisted it.
+    pub(crate) fn refreshing(
+        mut self,
+        identity: SandboxIdentity,
+        config: SharedSandboxConfig,
+    ) -> Self {
+        self.refresh = Some(ConfigRefresh { identity, config });
+        self
     }
 
     /// Set the desired effective vCPU count.
@@ -362,6 +381,12 @@ impl SandboxModificationBuilder {
     /// identity requirement, or placeholder passthrough hosts require restart
     /// or next-start policy, even when combined with otherwise live edits.
     pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
+        // Applies through this sandbox and its clones run one at a time, so each reads the
+        // config the previous one saved and the last config stored is the newest one.
+        let _modify_guard = match &self.refresh {
+            Some(refresh) => Some(refresh.config.lock_modify().await),
+            None => None,
+        };
         let handle = self
             .backend
             .sandboxes()
@@ -546,6 +571,14 @@ impl SandboxModificationBuilder {
                 None
             };
             persist_config(&self.backend, &handle, &config, active_labels).await?;
+        }
+        // The saved config is now final. Hand it to the sandbox object before any
+        // restart, so its later execs match a fresh connect even if the start fails.
+        // A different sandbox that reused the name must not overwrite this one's config.
+        if let Some(refresh) = self.refresh
+            && handle.identity() == refresh.identity
+        {
+            refresh.config.store(config);
         }
         if restart_required {
             start_after_modify(&handle).await?;
@@ -3837,6 +3870,186 @@ mod tests {
             .unwrap();
         let stored: SandboxConfig = serde_json::from_str(&stored.config).unwrap();
         assert!(stored.spec.labels.is_empty());
+    }
+
+    /// An agent client whose relay answers the handshake and nothing else.
+    async fn idle_agent_client() -> (crate::agent::AgentClient, tokio::io::DuplexStream) {
+        use microsandbox_protocol::{
+            codec,
+            core::Ready,
+            message::{Message, MessageType},
+        };
+        use tokio::io::AsyncWriteExt;
+
+        let (client_io, mut server_io) = tokio::io::duplex(4096);
+        let handshake = tokio::spawn(async move {
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            let ready = Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
+            codec::write_message(&mut server_io, &ready).await.unwrap();
+            server_io
+        });
+        let client = crate::agent::AgentClient::connect_stream_with_timeout(
+            client_io,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        (client, handshake.await.unwrap())
+    }
+
+    /// Insert a stopped sandbox row and return a live `Sandbox` object bound to it.
+    async fn stopped_sandbox_object(
+        backend: &Arc<dyn Backend>,
+        config: SandboxConfig,
+    ) -> (crate::sandbox::Sandbox, tokio::io::DuplexStream) {
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        let model = sandbox_entity::ActiveModel {
+            name: Set(config.spec.name.clone()),
+            config: Set(serde_json::to_string(&config).unwrap()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let (client, server_io) = idle_agent_client().await;
+        let sandbox = crate::sandbox::Sandbox::from_local(
+            backend.clone(),
+            crate::backend::SandboxLocalState {
+                db_id: model.id,
+                handle: None,
+                client: Arc::new(client),
+            },
+            config,
+        );
+        (sandbox, server_io)
+    }
+
+    async fn test_backend(home: &std::path::Path) -> Arc<dyn Backend> {
+        Arc::new(
+            LocalBackend::builder()
+                .config_path(home.join("config.json"))
+                .managed_config_path(home.join("managed.json"))
+                .home(home)
+                .build()
+                .await
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn sandbox_reflects_saved_config_after_its_own_modify() {
+        let temp = tempdir().unwrap();
+        let backend = test_backend(temp.path()).await;
+        let mut current = config(2, 1024);
+        current.spec.env = vec![EnvVar::new("MODE", "dev"), EnvVar::new("KEEP", "1")];
+        current.spec.runtime.workdir = Some("/old".into());
+        let (sandbox, _relay) = stopped_sandbox_object(&backend, current).await;
+        // Bindings clone the object per call; the refresh must reach the clone they keep.
+        let kept = sandbox.clone();
+
+        sandbox
+            .modify()
+            .env("MODE", "prod")
+            .env("ADDED", "1")
+            .remove_env("KEEP")
+            .workdir("/app")
+            .apply()
+            .await
+            .unwrap();
+
+        let saved = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap()
+            .config()
+            .unwrap();
+        for object in [&sandbox, &kept] {
+            assert_eq!(
+                serde_json::to_value(&*object.config()).unwrap(),
+                serde_json::to_value(&saved).unwrap()
+            );
+            let request = crate::sandbox::build_exec_request(
+                &object.config(),
+                "env".into(),
+                Vec::new(),
+                None,
+                None,
+                &[],
+                &[],
+                false,
+                0,
+                0,
+            );
+            assert_eq!(request.cwd.as_deref(), Some("/app"));
+            assert_eq!(request.env, vec!["MODE=prod", "ADDED=1"]);
+        }
+
+        // A rejected modify leaves the object on the saved config.
+        sandbox
+            .modify()
+            .env("MSB_X", "1")
+            .apply()
+            .await
+            .unwrap_err();
+        assert_eq!(kept.config().spec.runtime.workdir.as_deref(), Some("/app"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_modifies_of_one_sandbox_leave_it_on_the_saved_config() {
+        let temp = tempdir().unwrap();
+        let backend = test_backend(temp.path()).await;
+        let (sandbox, _relay) = stopped_sandbox_object(&backend, config(2, 1024)).await;
+        let clone = sandbox.clone();
+
+        let (first, second) = tokio::join!(
+            sandbox.modify().env("FIRST", "1").apply(),
+            clone.modify().env("SECOND", "2").apply(),
+        );
+        first.unwrap();
+        second.unwrap();
+
+        let saved = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap()
+            .config()
+            .unwrap();
+        let keys: Vec<_> = saved.spec.env.iter().map(|var| var.key.as_str()).collect();
+        assert_eq!(keys, vec!["FIRST", "SECOND"]);
+        for object in [&sandbox, &clone] {
+            assert_eq!(
+                serde_json::to_value(&*object.config()).unwrap(),
+                serde_json::to_value(&saved).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_keeps_its_config_when_its_name_was_reused() {
+        let temp = tempdir().unwrap();
+        let backend = test_backend(temp.path()).await;
+        let mut original = config(2, 1024);
+        original.spec.runtime.workdir = Some("/old".into());
+        let (stale, _relay) = stopped_sandbox_object(&backend, original).await;
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        sandbox_entity::Entity::delete_many()
+            .filter(sandbox_entity::Column::Name.eq("api"))
+            .exec(pools.write())
+            .await
+            .unwrap();
+        let (_replacement, _replacement_relay) =
+            stopped_sandbox_object(&backend, config(2, 1024)).await;
+
+        // Whatever apply does to the replacement, its config must not land in this object.
+        let _ = stale.modify().workdir("/app").apply().await;
+
+        assert_eq!(stale.config().spec.runtime.workdir.as_deref(), Some("/old"));
     }
 
     #[tokio::test]

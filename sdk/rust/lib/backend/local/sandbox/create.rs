@@ -990,7 +990,7 @@ impl LocalBackend {
                 write_db,
                 sandbox_id,
                 &persisted_config,
-                sandbox.config(),
+                &sandbox.config(),
             )
             .await
             {

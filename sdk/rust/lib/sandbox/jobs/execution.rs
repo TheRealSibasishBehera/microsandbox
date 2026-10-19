@@ -65,7 +65,7 @@ impl Sandbox {
             _ => None,
         };
         let request = build_exec_request(
-            self.config(),
+            &self.config(),
             cmd.into(),
             options.args,
             options.cwd,

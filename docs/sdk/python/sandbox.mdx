@@ -614,6 +614,8 @@ await sb.modify(secrets_rm=["OLD_API_KEY"])
 
 Plan or apply a configuration change. The returned plan uses [`ModificationDisposition`](#modificationdisposition) to classify when each change takes effect.
 
+After a successful apply, this sandbox object uses the saved config for later execs, the same config a new connect loads. A change made elsewhere, such as `msb modify` in another process, reaches it only after you connect again.
+
 `cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart.
 
 `root_disk_size` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.

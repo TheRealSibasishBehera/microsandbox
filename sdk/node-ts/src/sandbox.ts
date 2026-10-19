@@ -515,8 +515,9 @@ export class Sandbox implements AsyncDisposable {
   // -- config -------------------------------------------------------------
 
   /**
-   * The full configuration this sandbox was created with — image, cpus,
-   * memory, env, mounts, etc. The shape mirrors `SandboxBuilder.build()`.
+   * The sandbox's full configuration — image, cpus, memory, env, mounts,
+   * etc. After a successful `modify()` through this sandbox it is the saved
+   * config. The shape mirrors `SandboxBuilder.build()`.
    */
   async config(): Promise<SandboxConfig> {
     const json = await withMappedErrors(() => this.inner.configJson());

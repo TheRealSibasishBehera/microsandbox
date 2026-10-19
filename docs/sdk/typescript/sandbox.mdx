@@ -282,7 +282,7 @@ console.log(`${config.memoryMib} MiB`);
 
 </Accordion>
 
-Get the full configuration the sandbox was created with - image, cpus, memory, env, mounts, and the rest. The shape mirrors [`SandboxBuilder.build()`](#sandboxbuilder-build).
+Get the sandbox's full configuration - image, cpus, memory, env, mounts, and the rest. It starts as the config the sandbox was created or connected with. After a successful [`modify()`](#sandbox-modify) through this sandbox, it returns the saved config. The shape mirrors [`SandboxBuilder.build()`](#sandboxbuilder-build).
 
 <p className="msb-label">Returns</p>
 
@@ -581,6 +581,8 @@ await sandbox.modify({ secretsRemove: ["OLD_API_KEY"] });
 </Accordion>
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
+
+After a successful apply, this sandbox object uses the saved config for later execs, the same config a new connect loads. A change made elsewhere, such as `msb modify` in another process, reaches it only after you connect again.
 
 `cpus` and `memory` resize live within the [`maxCpus`](#sandboxbuilder-maxcpus) / [`maxMemory`](#sandboxbuilder-maxmemory) ceilings; raising a ceiling requires a restart.
 

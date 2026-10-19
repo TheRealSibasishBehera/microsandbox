@@ -229,7 +229,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
 #### <span className="msb-recv">sb.</span><span className="msb-hn">config()</span>
 
 ```rust
-fn config(&self) -> &SandboxConfig
+fn config(&self) -> Arc<SandboxConfig>
 ```
 
 <Accordion title="Example">
@@ -240,7 +240,7 @@ println!("{} MiB", sb.config().memory_mib);
 
 </Accordion>
 
-Access the sandbox's full configuration.
+Access the sandbox's full configuration. It returns a snapshot. After a successful [`modify()`](#sb-modify) through this sandbox or a clone, it returns the saved config.
 
 <p className="msb-label">Returns</p>
 
@@ -589,6 +589,8 @@ for r in &plan.resize_status {
 </Accordion>
 
 Plan or apply a configuration change. Set what to change (CPUs, memory, env vars, labels, workdir, secrets), then call [`dry_run()`](#modification-dry_run) to preview or [`apply()`](#modification-apply) to commit. Both return a [`SandboxModificationPlan`](#sandboxmodificationplan) labeling each change `live`, `next start`, `requires restart`, or `unsupported`. Apply is all-or-nothing.
+
+After a successful apply, this sandbox object uses the saved config for later execs, the same config a new connect loads. A change made elsewhere, such as `msb modify` in another process, reaches it only after you connect again.
 
 CPU and memory resize live within the [`max_cpus`](#modification-max_cpus) / [`max_memory`](#modification-max_memory) ceilings; raising a ceiling requires a restart.
 

@@ -618,6 +618,8 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
 
+After a successful apply, this sandbox object uses the saved config for later execs, the same config a new connect loads. A change made elsewhere, such as `msb modify` in another process, reaches it only after you connect again.
+
 `CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart.
 
 `RootDiskSizeMiB` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.
