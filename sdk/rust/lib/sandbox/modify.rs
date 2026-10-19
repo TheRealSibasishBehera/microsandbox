@@ -208,6 +208,10 @@ impl SandboxModificationBuilder {
     }
 
     /// Set the working directory for future execs.
+    ///
+    /// The path must be absolute, as at create. With `restart` on a running
+    /// sandbox it must also be a directory in the guest, checked before the
+    /// sandbox stops.
     pub fn workdir(mut self, path: impl Into<String>) -> Self {
         self.patch.workdir = Some(path.into());
         self
@@ -323,6 +327,15 @@ impl SandboxModificationBuilder {
                 });
             }
         }
+        if plan.conflicts.is_empty()
+            && let Err(error) =
+                workdir_preflight(&self.backend, &handle, status, &plan, &self.patch).await
+        {
+            plan.conflicts.push(ModificationConflict {
+                field: WORKDIR_FIELD.into(),
+                message: error.to_string(),
+            });
+        }
         Ok(plan)
     }
 
@@ -380,6 +393,7 @@ impl SandboxModificationBuilder {
             }
             ports::preflight(&config, active.as_ref(), &self.patch, status)?;
         }
+        workdir_preflight(&self.backend, &handle, status, &plan, &self.patch).await?;
         if handle.local().is_some() {
             // Validate configuration serialization before stopping a VM,
             // growing a disk, or issuing any live control mutation.
@@ -1795,6 +1809,40 @@ async fn persist_active_config(
     Ok(())
 }
 
+/// Check a planned workdir change against what the next boot refuses: the
+/// installed runtime's launch transport, and, when `restart` reboots a running
+/// sandbox now, the directory inside the guest (as create checks it). A stopped
+/// sandbox or `next_start` has no guest booting this config to check against.
+async fn workdir_preflight(
+    backend: &Arc<dyn Backend>,
+    handle: &super::SandboxHandle,
+    status: SandboxStatus,
+    plan: &SandboxModificationPlan,
+    patch: &SandboxModificationPatch,
+) -> MicrosandboxResult<()> {
+    let Some(workdir) = patch.workdir.as_deref() else {
+        return Ok(());
+    };
+    let Some(local) = backend.as_local() else {
+        return Ok(());
+    };
+    if !plan.changes.iter().any(
+        |change| matches!(change, PlannedChange::Config(change) if change.field == WORKDIR_FIELD),
+    ) {
+        return Ok(());
+    }
+    crate::runtime::launch_contract::validate_runtime_workdir(workdir, local.config()).await?;
+    if running_status(status) && plan.policy == ModificationPolicy::Restart {
+        let sandbox = handle.connect().await.map_err(|cause| {
+            MicrosandboxError::InvalidConfig(format!(
+                "could not validate workdir in guest {workdir:?}: {cause}"
+            ))
+        })?;
+        super::validate_guest_workdir(&sandbox, workdir).await?;
+    }
+    Ok(())
+}
+
 async fn start_after_modify(handle: &super::SandboxHandle) -> MicrosandboxResult<()> {
     let sandbox = handle.refresh().await?.start_detached().await?;
     sandbox.detach().await;
@@ -2458,6 +2506,15 @@ fn push_spec_conflicts(
                 message: format!("label {key} is both set and removed in the same modification"),
             });
         }
+    }
+    // Same rules as create; agentd refuses these values at the next boot.
+    if let Err(crate::MicrosandboxError::InvalidConfig(message)) =
+        super::validate_workdir(patch.workdir.as_deref())
+    {
+        conflicts.push(ModificationConflict {
+            field: WORKDIR_FIELD.to_string(),
+            message,
+        });
     }
 }
 
@@ -3780,6 +3837,128 @@ mod tests {
             .unwrap();
         let stored: SandboxConfig = serde_json::from_str(&stored.config).unwrap();
         assert!(stored.spec.labels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn modify_rejects_invalid_workdir_and_saves_nothing() {
+        let temp = tempdir().unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(
+            LocalBackend::builder()
+                .config_path(temp.path().join("config.json"))
+                .managed_config_path(temp.path().join("managed.json"))
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        let mut current = config(2, 1024);
+        current.spec.runtime.workdir = Some("/app".into());
+        let stored_before = serde_json::to_string(&current).unwrap();
+        let model = sandbox_entity::ActiveModel {
+            name: Set(current.spec.name.clone()),
+            config: Set(stored_before.clone()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let stored_config = || async {
+            sandbox_entity::Entity::find_by_id(model.id)
+                .one(pools.read())
+                .await
+                .unwrap()
+                .unwrap()
+                .config
+        };
+
+        for (workdir, expected) in [
+            ("", "workdir must not be empty"),
+            ("srv", "workdir must be an absolute guest path"),
+            ("/srv\0x", "workdir must not contain NUL"),
+        ] {
+            let plan = SandboxModificationBuilder::new(backend.clone(), "api")
+                .workdir(workdir)
+                .dry_run()
+                .await
+                .unwrap();
+            assert_eq!(plan.conflicts.len(), 1, "{workdir:?}");
+            assert_eq!(plan.conflicts[0].field, WORKDIR_FIELD);
+            assert!(
+                plan.conflicts[0].message.contains(expected),
+                "{workdir:?}: {}",
+                plan.conflicts[0].message
+            );
+
+            let error = SandboxModificationBuilder::new(backend.clone(), "api")
+                .workdir(workdir)
+                .apply()
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{workdir:?}: {error}");
+            assert_eq!(stored_config().await, stored_before);
+        }
+
+        let plan = SandboxModificationBuilder::new(backend.clone(), "api")
+            .workdir("/srv")
+            .apply()
+            .await
+            .unwrap();
+        assert!(plan.applied);
+        let saved: SandboxConfig = serde_json::from_str(&stored_config().await).unwrap();
+        assert_eq!(saved.spec.runtime.workdir.as_deref(), Some("/srv"));
+    }
+
+    #[tokio::test]
+    async fn restart_checks_new_workdir_in_guest_before_stopping() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(
+            LocalBackend::builder()
+                .config_path(temp.path().join("config.json"))
+                .managed_config_path(temp.path().join("managed.json"))
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        let stored_before = serde_json::to_string(&config(2, 1024)).unwrap();
+        let model = sandbox_entity::ActiveModel {
+            name: Set("api".into()),
+            config: Set(stored_before.clone()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Running),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+
+        // No guest agent answers, so the new workdir cannot be checked. The
+        // modification must fail before it stops the sandbox or saves anything.
+        let error = SandboxModificationBuilder::new(backend.clone(), "api")
+            .workdir("/srv")
+            .restart()
+            .apply()
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not validate workdir in guest"),
+            "{error}"
+        );
+        let stored = sandbox_entity::Entity::find_by_id(model.id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.config, stored_before);
+        assert_eq!(stored.status, SandboxStatus::Running);
     }
 
     #[tokio::test]

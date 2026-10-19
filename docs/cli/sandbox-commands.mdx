@@ -607,6 +607,8 @@ Resize can take time. The output and JSON `resize_status` report each resourceâ€
 
 Env and workdir changes on a running sandbox apply to future execs only; running processes keep their current environment. The plan reports this as a warning.
 
+`--workdir` must be an absolute path. With `--restart` on a running sandbox, modify also checks that the directory exists in the guest, before it stops the sandbox.
+
 <Accordion title="Secret updates, substitution, and passthrough">
 
 `--secret` reads the same-named host environment variable; inline values are rejected. Options are `query`, `body`, `no-headers`, `headers=[FIELD,...]` (substitute only in those header fields; `headers=*` restores all headers, `*` cannot be combined with named fields, and `headers=` cannot be combined with `no-headers`), and `passthrough=HOST` or `passthrough=[HOST,...]`. Restrict `headers` to the credential header the API reads, since substituting in every header lets a reflecting endpoint return the secret to the guest. Without `query`, `body`, `no-headers`, or `headers=`, modify keeps the secret's current substitution rule. Any of them replaces the whole rule, and unstated locations reset to defaults, so `query` alone re-enables every header. Repeated declarations merge. See [secret updates](/sandboxes/secrets#update-secrets).

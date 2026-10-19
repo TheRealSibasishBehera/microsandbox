@@ -332,6 +332,8 @@ out, err := sb.Exec(ctx, "printenv", []string{"MODE"})
 
 Processes that were already running keep their original environment and working directory.
 
+The workdir must be an absolute path. With `--restart` on a running sandbox, modify also checks that the directory exists in the guest, before it stops the sandbox.
+
 <span id="secrets" />
 
 ### Rotate secrets
