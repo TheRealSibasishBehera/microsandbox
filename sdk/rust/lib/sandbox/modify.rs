@@ -392,13 +392,11 @@ impl SandboxModificationBuilder {
         if restart_required {
             handle.stop().await?;
         }
-        let mut live_step_applied = false;
         if !restart_required && let Some(target) = live_cpu_target(&plan, &self.patch) {
             let state = control_session(&session)?
                 .request(&SetCpuTarget::new(u32::from(target)))
                 .await
                 .map_err(crate::MicrosandboxError::ControlClient)?;
-            live_step_applied = true;
             plan.resize_status.push(ResourceResizeStatus {
                 resource: ResourceKind::Cpus,
                 requested: target.to_string(),
@@ -432,7 +430,6 @@ impl SandboxModificationBuilder {
                 })
                 .await
                 .map_err(crate::MicrosandboxError::ControlClient)?;
-            live_step_applied = true;
             plan.resize_status.push(ResourceResizeStatus {
                 resource: ResourceKind::Memory,
                 requested: format_mib(target_mib),
@@ -462,7 +459,6 @@ impl SandboxModificationBuilder {
             let updates = live_secret_updates(&plan, &self.patch)?;
             if !updates.is_empty() {
                 control_secrets_update(control_session(&session)?, updates).await?;
-                live_step_applied = true;
                 // The running network layer changed: mirror the secret patch
                 // into the active snapshot so inspect does not report the
                 // already-live change as pending.
@@ -490,7 +486,6 @@ impl SandboxModificationBuilder {
                 ))
                 .await
                 .map_err(crate::MicrosandboxError::ControlClient)?;
-            live_step_applied = true;
             if observed.filesystem_bytes != size_bytes || observed.device_bytes < size_bytes {
                 return Err(crate::MicrosandboxError::Runtime(
                     "root growth did not confirm usable capacity".into(),
@@ -526,10 +521,7 @@ impl SandboxModificationBuilder {
             let active_labels = if !restart_required && has_live_label_change(&plan) {
                 let (Some(active), Some(expected_json)) = (active.as_mut(), active_json.clone())
                 else {
-                    return Err(label_guard_outcome(
-                        MicrosandboxError::ControlStateChanged,
-                        live_step_applied,
-                    ));
+                    return Err(MicrosandboxError::ControlStateChanged);
                 };
                 apply_label_patch_to_config(active, &self.patch);
                 Some(ActiveLabelsUpdate {
@@ -539,9 +531,7 @@ impl SandboxModificationBuilder {
             } else {
                 None
             };
-            persist_config(&self.backend, &handle, &config, active_labels)
-                .await
-                .map_err(|error| label_guard_outcome(error, live_step_applied))?;
+            persist_config(&self.backend, &handle, &config, active_labels).await?;
         }
         if restart_required {
             start_after_modify(&handle).await?;
@@ -1783,17 +1773,6 @@ async fn persist_config(
             }
         })
         .await
-}
-
-fn label_guard_outcome(error: MicrosandboxError, live_step_applied: bool) -> MicrosandboxError {
-    if matches!(error, MicrosandboxError::ControlStateChanged) && !live_step_applied {
-        MicrosandboxError::Runtime(
-            "sandbox state changed before the labels were saved; nothing was applied; retry the modification"
-                .into(),
-        )
-    } else {
-        error
-    }
 }
 
 async fn persist_active_config(
@@ -3874,10 +3853,8 @@ mod tests {
 
     #[tokio::test]
     async fn label_guard_rolls_back_all_copies() {
-        for (name, active_changed, live_step_applied) in [
-            ("active config changed", true, false),
-            ("sandbox stopped", false, true),
-        ] {
+        for (name, active_changed) in [("active config changed", true), ("sandbox stopped", false)]
+        {
             let temp = tempdir().unwrap();
             let (local, backend) = label_backend(temp.path()).await;
             let mut current = config(2, 1024);
@@ -3927,18 +3904,12 @@ mod tests {
                 }),
             )
             .await
-            .map_err(|error| label_guard_outcome(error, live_step_applied))
             .expect_err("label guard accepted stale state");
 
-            match (live_step_applied, error) {
-                (true, MicrosandboxError::ControlStateChanged) => {}
-                (false, MicrosandboxError::Runtime(message)) => assert_eq!(
-                    message,
-                    "sandbox state changed before the labels were saved; nothing was applied; retry the modification",
-                    "{name}"
-                ),
-                (_, error) => panic!("{name}: unexpected error: {error}"),
-            }
+            assert!(
+                matches!(&error, MicrosandboxError::ControlStateChanged),
+                "{name}: unexpected error: {error}"
+            );
             assert_eq!(label_copies(&local, sandbox_id).await, before, "{name}");
         }
     }
