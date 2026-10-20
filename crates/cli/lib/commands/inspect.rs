@@ -509,9 +509,9 @@ fn workdir_value(config: &SandboxConfig) -> String {
         .unwrap_or_else(|| "(none)".to_string())
 }
 
-/// `KEY=VALUE` for the first entry with `key`, as an exec sends it, or `KEY (unset)`.
+/// `KEY=VALUE` for the last entry with `key`, the one commands see, or `KEY (unset)`.
 fn env_value(config: &SandboxConfig, key: &str) -> String {
-    match config.spec.env.iter().find(|var| var.key == key) {
+    match config.spec.env.iter().rev().find(|var| var.key == key) {
         Some(var) => format!("{}={}", var.key, var.value),
         None => format!("{key} (unset)"),
     }
@@ -644,6 +644,22 @@ mod tests {
                 ("env", Some("GONE"), "GONE=x", "GONE (unset)"),
             ]
         );
+    }
+
+    #[test]
+    fn pending_env_changes_compare_the_last_entry_for_a_key() {
+        let mut active = config(2, 1024);
+        active.spec.env = vec![EnvVar::new("KEY", "first"), EnvVar::new("KEY", "second")];
+        let mut desired = active.clone();
+        desired.spec.env = vec![EnvVar::new("KEY", "first"), EnvVar::new("KEY", "third")];
+
+        let changes = pending_config_changes(SandboxStatus::Running, Some(&desired), Some(&active));
+
+        let rows: Vec<_> = changes
+            .iter()
+            .map(|change| (change.active.as_str(), change.desired.as_str()))
+            .collect();
+        assert_eq!(rows, vec![("KEY=second", "KEY=third")]);
     }
 
     #[test]
