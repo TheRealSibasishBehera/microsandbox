@@ -5202,10 +5202,16 @@ mod tests {
         exec.abort();
         assert!(request.replace_default_env);
 
-        let cloud: Arc<dyn Backend> = Arc::new(
-            crate::test_support::cloud_backend("https://unused.invalid", "msb_test_exec").unwrap(),
-        );
-        for (backend, expected) in [(&backend, true), (&cloud, false)] {
+        let mut backends = vec![(backend.clone(), true)];
+        #[cfg(feature = "cloud")]
+        backends.push((
+            Arc::new(
+                crate::test_support::cloud_backend("https://unused.invalid", "msb_test_exec")
+                    .unwrap(),
+            ) as Arc<dyn Backend>,
+            false,
+        ));
+        for (backend, expected) in backends {
             let request = crate::sandbox::build_exec_request(
                 backend.as_ref(),
                 &config,
@@ -5268,7 +5274,7 @@ mod tests {
             EnvVar::new("NEW", "1"),
         ];
         assert_eq!(kept.config().spec.env, running);
-        assert!(crate::sandbox::replaces_default_env(backend.as_ref()));
+        assert!(crate::sandbox::exec::replaces_default_env(backend.as_ref()));
     }
 
     #[test]
