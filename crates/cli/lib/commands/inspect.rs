@@ -76,6 +76,9 @@ pub struct InspectArgs {
 #[derive(Debug, Serialize)]
 struct PendingConfigChange {
     field: &'static str,
+    /// The environment variable an `env` change is about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
     active: String,
     desired: String,
     effect: &'static str,
@@ -257,17 +260,41 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         };
         ui::detail_kv("Deployment Profile", deployment_profile);
 
-        if let Some(ref workdir) = config.spec.runtime.workdir {
-            ui::detail_kv("Workdir", workdir);
+        let workdir_change = change_for("workdir");
+        if config.spec.runtime.workdir.is_some() || workdir_change.is_some() {
+            ui::detail_kv(
+                "Workdir",
+                &resource_value(&workdir_value(&config), workdir_change),
+            );
         }
         if let Some(ref shell) = config.spec.runtime.shell {
             ui::detail_kv("Shell", shell);
         }
 
-        if !config.spec.env.is_empty() {
+        let env_change = |key: &str| {
+            pending_changes
+                .iter()
+                .find(|change| change.field == "env" && change.key.as_deref() == Some(key))
+        };
+        let removed_env: Vec<_> = pending_changes
+            .iter()
+            .filter(|change| {
+                change.field == "env"
+                    && !config
+                        .spec
+                        .env
+                        .iter()
+                        .any(|var| change.key.as_deref() == Some(var.key.as_str()))
+            })
+            .collect();
+        if !config.spec.env.is_empty() || !removed_env.is_empty() {
             ui::detail_header("Environment");
             for var in &config.spec.env {
-                println!("  {}={}", var.key, var.value);
+                let line = format!("{}={}", var.key, var.value);
+                println!("  {}", resource_value(&line, env_change(&var.key)));
+            }
+            for change in removed_env {
+                println!("  {}", resource_value(&change.desired, Some(change)));
             }
         }
 
@@ -408,6 +435,7 @@ fn pending_config_changes(
     if desired.spec.resources.cpus != active.spec.resources.cpus {
         changes.push(PendingConfigChange {
             field: "cpus",
+            key: None,
             active: active.spec.resources.cpus.to_string(),
             desired: desired.spec.resources.cpus.to_string(),
             effect: "requires restart",
@@ -416,6 +444,7 @@ fn pending_config_changes(
     if desired.spec.resources.max_cpus != active.spec.resources.max_cpus {
         changes.push(PendingConfigChange {
             field: "max_cpus",
+            key: None,
             active: active.spec.resources.max_cpus.to_string(),
             desired: desired.spec.resources.max_cpus.to_string(),
             effect: "requires restart",
@@ -424,6 +453,7 @@ fn pending_config_changes(
     if desired.spec.resources.memory_mib != active.spec.resources.memory_mib {
         changes.push(PendingConfigChange {
             field: "memory",
+            key: None,
             active: format_mib(active.spec.resources.memory_mib),
             desired: format_mib(desired.spec.resources.memory_mib),
             effect: "requires restart",
@@ -432,13 +462,59 @@ fn pending_config_changes(
     if desired.spec.resources.max_memory_mib != active.spec.resources.max_memory_mib {
         changes.push(PendingConfigChange {
             field: "max_memory",
+            key: None,
             active: format_mib(active.spec.resources.max_memory_mib),
             desired: format_mib(desired.spec.resources.max_memory_mib),
             effect: "requires restart",
         });
     }
+    if desired.spec.runtime.workdir != active.spec.runtime.workdir {
+        changes.push(PendingConfigChange {
+            field: "workdir",
+            key: None,
+            active: workdir_value(active),
+            desired: workdir_value(desired),
+            effect: "next start",
+        });
+    }
+    let mut env_keys: Vec<&str> = Vec::new();
+    for var in desired.spec.env.iter().chain(&active.spec.env) {
+        if !env_keys.contains(&var.key.as_str()) {
+            env_keys.push(&var.key);
+        }
+    }
+    for key in env_keys {
+        let active_value = env_value(active, key);
+        let desired_value = env_value(desired, key);
+        if active_value != desired_value {
+            changes.push(PendingConfigChange {
+                field: "env",
+                key: Some(key.to_string()),
+                active: active_value,
+                desired: desired_value,
+                effect: "next start",
+            });
+        }
+    }
 
     changes
+}
+
+fn workdir_value(config: &SandboxConfig) -> String {
+    config
+        .spec
+        .runtime
+        .workdir
+        .clone()
+        .unwrap_or_else(|| "(none)".to_string())
+}
+
+/// `KEY=VALUE` for the first entry with `key`, as an exec sends it, or `KEY (unset)`.
+fn env_value(config: &SandboxConfig, key: &str) -> String {
+    match config.spec.env.iter().find(|var| var.key == key) {
+        Some(var) => format!("{}={}", var.key, var.value),
+        None => format!("{key} (unset)"),
+    }
 }
 
 fn status_has_active_config(status: SandboxStatus) -> bool {
@@ -476,6 +552,8 @@ fn resource_value(plain: &str, change: Option<&PendingConfigChange>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox::sandbox::EnvVar;
+
     use super::*;
 
     fn config(cpus: u8, memory_mib: u32) -> SandboxConfig {
@@ -513,6 +591,7 @@ mod tests {
     fn resource_value_inlines_pending_divergence() {
         let change = PendingConfigChange {
             field: "memory",
+            key: None,
             active: "1 GiB".to_string(),
             desired: "4 GiB".to_string(),
             effect: "requires restart",
@@ -524,6 +603,47 @@ mod tests {
         let plain = console::strip_ansi_codes(&rendered).to_string();
         assert_eq!(plain, "1 GiB \u{2192} 4 GiB next start");
         assert!(rendered.starts_with("1 GiB"));
+    }
+
+    #[test]
+    fn pending_config_changes_show_env_and_workdir_saved_for_the_next_start() {
+        let mut active = config(2, 1024);
+        active.spec.env = vec![
+            EnvVar::new("MODE", "dev"),
+            EnvVar::new("KEEP", "1"),
+            EnvVar::new("GONE", "x"),
+        ];
+        active.spec.runtime.workdir = Some("/app".to_string());
+        let mut desired = active.clone();
+        desired.spec.env = vec![
+            EnvVar::new("MODE", "prod"),
+            EnvVar::new("KEEP", "1"),
+            EnvVar::new("NEW", "1"),
+        ];
+        desired.spec.runtime.workdir = Some("/srv".to_string());
+
+        let changes = pending_config_changes(SandboxStatus::Running, Some(&desired), Some(&active));
+
+        let rows: Vec<_> = changes
+            .iter()
+            .map(|change| {
+                (
+                    change.field,
+                    change.key.as_deref(),
+                    change.active.as_str(),
+                    change.desired.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("workdir", None, "/app", "/srv"),
+                ("env", Some("MODE"), "MODE=dev", "MODE=prod"),
+                ("env", Some("NEW"), "NEW (unset)", "NEW=1"),
+                ("env", Some("GONE"), "GONE=x", "GONE (unset)"),
+            ]
+        );
     }
 
     #[test]

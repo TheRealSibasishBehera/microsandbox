@@ -641,7 +641,7 @@ pub(crate) mod agent {
         );
 
         let req = build_exec_request(
-            config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols,
+            backend, config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols,
         );
         let (id, rx) = client.stream(MessageType::ExecRequest, &req).await?;
 

@@ -295,6 +295,7 @@ pub(crate) mod agent {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
         let req = build_exec_request(
+            backend,
             config,
             cmd,
             opts.args,
@@ -486,6 +487,7 @@ pub(crate) mod agent {
         let (cols, rows) = current_terminal_size().unwrap_or((80, 24));
 
         let req = build_exec_request(
+            backend,
             config,
             cmd,
             opts.args,

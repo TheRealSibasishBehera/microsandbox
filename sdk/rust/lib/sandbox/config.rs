@@ -334,8 +334,7 @@ pub struct SandboxConfig {
 }
 
 /// The config a live [`Sandbox`](super::Sandbox) builds requests from, shared by its clones.
-///
-/// Readers take a snapshot; the sandbox's own `modify` replaces it with the saved config.
+/// Readers take a snapshot; the sandbox's own `modify` replaces it with what the VM now uses.
 #[derive(Clone)]
 pub(crate) struct SharedSandboxConfig {
     config: Arc<RwLock<Arc<SandboxConfig>>>,

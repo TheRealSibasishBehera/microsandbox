@@ -683,16 +683,14 @@ impl Sandbox {
     }
 
     /// The configuration this sandbox builds exec, shell, attach, and SSH
-    /// requests from (image, cpus, memory, env, mounts, etc.).
+    /// requests from (image, cpus, memory, env, mounts, etc.): the one its
+    /// running VM uses, as of create, start, or [`connect`](SandboxHandle::connect).
     ///
-    /// It starts as the create-time or connect-time config. A successful
-    /// [`modify`](Self::modify) through this sandbox, or any clone of it,
-    /// replaces it with the saved config. Changes made elsewhere (another
-    /// process, a [`SandboxHandle`]) are not seen until a new
-    /// [`connect`](SandboxHandle::connect).
-    ///
-    /// Returns a snapshot: a later modify does not change a value already
-    /// returned.
+    /// A successful [`modify`](Self::modify) through this sandbox or a clone
+    /// replaces it with what the VM now uses (the saved config if stopped).
+    /// Next-start changes are not included, and changes made elsewhere (another
+    /// process, a [`SandboxHandle`]) are seen only after a new connect.
+    /// [`SandboxHandle::config`] returns the saved config. Returns a snapshot.
     pub fn config(&self) -> Arc<SandboxConfig> {
         self.config.load()
     }
@@ -700,9 +698,8 @@ impl Sandbox {
     /// Start planning a sandbox modification.
     ///
     /// The returned builder owns the canonical SDK patch and dry-run
-    /// classification logic. After a successful
-    /// [`apply`](SandboxModificationBuilder::apply), this sandbox and its
-    /// clones use the saved config for later requests.
+    /// classification logic. A successful apply also updates
+    /// [`config`](Self::config) for this sandbox and its clones.
     #[cfg(feature = "local")]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
@@ -1544,8 +1541,12 @@ pub(crate) fn create_spawn_mode(config: &SandboxConfig, requested: SpawnMode) ->
 }
 
 /// Build an `ExecRequest` by merging sandbox config with caller-provided overrides.
+///
+/// Whether the request asks agentd to drop boot env defaults that `config` no
+/// longer has depends on `backend` (see [`replaces_default_env`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_exec_request(
+    backend: &dyn crate::backend::Backend,
     config: &SandboxConfig,
     cmd: String,
     args: Vec<String>,
@@ -1589,6 +1590,23 @@ pub(crate) fn build_exec_request(
         rows,
         cols,
         rlimits,
+        replace_default_env: replaces_default_env(backend),
+    }
+}
+
+/// Whether exec requests from a [`Sandbox`] of this backend ask agentd to drop
+/// boot env defaults the config no longer has. Only local: its config is the one
+/// the VM runs, so its env is complete; a cloud config is the curated spec, which
+/// can leave env out.
+pub(crate) fn replaces_default_env(backend: &dyn crate::backend::Backend) -> bool {
+    #[cfg(feature = "local")]
+    {
+        backend.as_local().is_some()
+    }
+    #[cfg(not(feature = "local"))]
+    {
+        let _ = backend;
+        false
     }
 }
 

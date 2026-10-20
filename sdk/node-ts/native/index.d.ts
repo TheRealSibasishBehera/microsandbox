@@ -1093,9 +1093,10 @@ export declare class Sandbox {
   /** Whether this handle owns the sandbox lifecycle (attached mode). */
   get ownsLifecycle(): boolean
   /**
-   * Get the sandbox's full configuration (image, cpus, memory, env,
-   * mounts, etc.) as a JSON string. After a successful `modify` through
-   * this sandbox it is the saved config.
+   * Get the configuration the sandbox's running VM uses (image, cpus,
+   * memory, env, mounts, etc.) as a JSON string; later execs are built from
+   * it. A `modify` through this sandbox updates it; next-start changes
+   * appear after a restart.
    * The TS layer parses + camelCase-remaps this into a plain object.
    */
   configJson(): Promise<string>

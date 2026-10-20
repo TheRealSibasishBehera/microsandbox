@@ -267,9 +267,10 @@ impl Sandbox {
         self.owns_lifecycle
     }
 
-    /// Get the sandbox's full configuration (image, cpus, memory, env,
-    /// mounts, etc.) as a JSON string. After a successful `modify` through
-    /// this sandbox it is the saved config.
+    /// Get the configuration the sandbox's running VM uses (image, cpus,
+    /// memory, env, mounts, etc.) as a JSON string; later execs are built from
+    /// it. A `modify` through this sandbox updates it; next-start changes
+    /// appear after a restart.
     /// The TS layer parses + camelCase-remaps this into a plain object.
     #[napi(js_name = "configJson")]
     pub async fn config_json(&self) -> Result<String> {
