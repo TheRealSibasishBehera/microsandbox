@@ -52,6 +52,7 @@ pub(crate) mod terminal;
 mod types;
 #[cfg(feature = "local")]
 pub(crate) mod upper;
+mod workdir;
 
 use std::{collections::BTreeMap, process::ExitStatus, sync::Arc};
 
@@ -136,6 +137,7 @@ pub(crate) use reap::reap_leaked_runtime_process;
 pub(crate) use types::validate_named_disk_mount_options;
 #[cfg(any(feature = "local", feature = "cloud"))]
 pub(crate) use types::validate_volume_mounts;
+pub(crate) use workdir::{validate_guest_workdir, validate_workdir};
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -1543,7 +1545,7 @@ pub(crate) fn create_spawn_mode(config: &SandboxConfig, requested: SpawnMode) ->
 /// Build an `ExecRequest` by merging sandbox config with caller-provided overrides.
 ///
 /// Whether the request asks agentd to drop boot env defaults that `config` no
-/// longer has depends on `backend` (see [`replaces_default_env`]).
+/// longer has depends on `backend` (see [`replaces_default_env`](exec::replaces_default_env)).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_exec_request(
     backend: &dyn crate::backend::Backend,
@@ -1590,23 +1592,7 @@ pub(crate) fn build_exec_request(
         rows,
         cols,
         rlimits,
-        replace_default_env: replaces_default_env(backend),
-    }
-}
-
-/// Whether exec requests from a [`Sandbox`] of this backend ask agentd to drop
-/// boot env defaults the config no longer has. Only local: its config is the one
-/// the VM runs, so its env is complete; a cloud config is the curated spec, which
-/// can leave env out.
-pub(crate) fn replaces_default_env(backend: &dyn crate::backend::Backend) -> bool {
-    #[cfg(feature = "local")]
-    {
-        backend.as_local().is_some()
-    }
-    #[cfg(not(feature = "local"))]
-    {
-        let _ = backend;
-        false
+        replace_default_env: exec::replaces_default_env(backend),
     }
 }
 
@@ -1748,50 +1734,6 @@ pub(crate) fn validate_env(env: &[EnvVar]) -> MicrosandboxResult<()> {
         init::validate_env_pair("environment variable", &var.key, &var.value)?;
     }
     Ok(())
-}
-
-/// Validate a sandbox workdir: a non-empty absolute guest path without NUL.
-/// agentd refuses an empty or NUL-bearing one at boot, and an init handoff a
-/// relative one. Checked textually, since `Path::is_absolute` follows host
-/// rules.
-pub(crate) fn validate_workdir(workdir: Option<&str>) -> MicrosandboxResult<()> {
-    let Some(workdir) = workdir else {
-        return Ok(());
-    };
-    if workdir.is_empty() {
-        return Err(crate::MicrosandboxError::InvalidConfig(
-            "workdir must not be empty".into(),
-        ));
-    }
-    if workdir.contains('\0') {
-        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-            "workdir must not contain NUL: {workdir:?}"
-        )));
-    }
-    if !workdir.starts_with('/') {
-        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-            "workdir must be an absolute guest path, got: {workdir:?}"
-        )));
-    }
-    Ok(())
-}
-
-/// Check that `workdir` is a directory inside the running guest.
-pub(crate) async fn validate_guest_workdir(
-    sandbox: &Sandbox,
-    workdir: &str,
-) -> MicrosandboxResult<()> {
-    match sandbox.fs().stat(workdir).await {
-        Ok(metadata) if metadata.kind == FsEntryKind::Directory => Ok(()),
-        Ok(_) => Err(crate::MicrosandboxError::InvalidConfig(format!(
-            "workdir is not a directory in guest: {workdir}"
-        ))),
-        // A fast-exiting startup command can close the transport during stat.
-        // Preserve that cause instead of claiming the directory is missing.
-        Err(cause) => Err(crate::MicrosandboxError::InvalidConfig(format!(
-            "could not validate workdir in guest {workdir:?}: {cause}"
-        ))),
-    }
 }
 
 #[cfg(feature = "local")]

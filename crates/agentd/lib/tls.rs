@@ -62,10 +62,6 @@ const TLS_ENV_KEYS: &[&str] = &[
     "NODE_EXTRA_CA_CERTS",
 ];
 
-//--------------------------------------------------------------------------------------------------
-// Statics
-//--------------------------------------------------------------------------------------------------
-
 /// Whether [`install_ca_cert`] set [`TLS_ENV_KEYS`] in agentd's environment.
 static TLS_ENV_INSTALLED: AtomicBool = AtomicBool::new(false);
 
