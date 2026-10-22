@@ -239,7 +239,8 @@ impl SandboxModificationBuilder {
     ///
     /// Live-capable changes apply to the running VM first (CPU count through
     /// guest CPU hotplug when the target fits inside the active `max_cpus`);
-    /// the desired config is persisted only after the live step succeeds. For
+    /// the desired config is persisted only after the live step succeeds, and
+    /// live label changes are saved with it. For
     /// stopped sandboxes or `next_start` requests, changes persist for the next
     /// start. When the policy is `restart`, the existing stop/start lifecycle
     /// path makes restart-required changes active. Live secret rotation,
