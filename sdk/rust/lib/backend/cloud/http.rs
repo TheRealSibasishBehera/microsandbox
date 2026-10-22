@@ -23,7 +23,8 @@ use crate::sandbox::{SandboxListBuilder, SandboxModificationPlan};
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
     CloudCreateSandboxResponse, CloudErrorBody, CloudMessageResponse, CloudPaginated,
-    CloudSandboxModificationApplyRequest, CloudSandboxModificationPlanRequest,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationPlan,
+    CloudSandboxModificationPlanRequest,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -233,7 +234,9 @@ impl CloudBackend {
             .send()
             .await
             .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/modifications/plan", e))?;
-        decode_json(resp, "POST /v1/sandboxes/:id/modifications/plan").await
+        let plan: CloudSandboxModificationPlan =
+            decode_json(resp, "POST /v1/sandboxes/:id/modifications/plan").await?;
+        Ok(plan.into())
     }
 
     /// `POST /v1/sandboxes/:id/modifications`, sent once. The body is the only

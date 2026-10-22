@@ -27,6 +27,7 @@ use crate::domain::{
 use crate::{TypesError, TypesResult};
 
 mod modify;
+mod modify_plan;
 mod secrets;
 mod snapshots;
 mod specs;
@@ -36,6 +37,12 @@ pub use modify::{
     CLOUD_MODIFICATION_UNSUPPORTED, CloudModificationRejection,
     CloudSandboxModificationApplyRequest, CloudSandboxModificationPlanRequest,
     CloudSecretApplyEntry, CloudSecretMaterial, CloudSecretPlanEntry, CloudSecretValue,
+};
+pub use modify_plan::{
+    CloudChangeKind, CloudConfigPlannedChange, CloudModificationConflict,
+    CloudModificationDisposition, CloudModificationWarning, CloudPlannedChange,
+    CloudResourceConvergenceState, CloudResourceKind, CloudResourceResizeStatus,
+    CloudSandboxModificationPlan, CloudSecretChangeKind, CloudSecretPlannedChange,
 };
 pub use secrets::{
     CloudHostPattern, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,

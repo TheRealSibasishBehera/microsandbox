@@ -641,6 +641,34 @@ async fn apply_returns_the_plan() {
 }
 
 #[tokio::test]
+async fn both_routes_read_the_cloud_spelling_into_the_local_plan() {
+    let mut answer = plan_json(true, "next_start");
+    answer["changes"][0]["change"] = json!("hosts_updated");
+    let mock = MockCloud::replies(vec![
+        Reply::Json(200, answer.clone()),
+        Reply::Json(200, answer),
+    ])
+    .await;
+    let backend = mock.backend();
+    let patch = value_patch(VALUE);
+
+    let planned = backend
+        .plan_modification(SANDBOX_ID, &patch, ModificationPolicy::NoRestart)
+        .await
+        .unwrap();
+    let applied = backend
+        .apply_modification(SANDBOX_ID, &patch, ModificationPolicy::NoRestart)
+        .await
+        .unwrap();
+
+    for plan in [planned, applied] {
+        let local = serde_json::to_value(&plan).unwrap();
+        assert_eq!(local["changes"][0]["disposition"], json!("next start"));
+        assert_eq!(local["changes"][0]["change"], json!("hosts updated"));
+    }
+}
+
+#[tokio::test]
 async fn plan_sends_a_value_free_request() {
     let mock = MockCloud::replies(vec![Reply::Json(200, plan_json(false, "live"))]).await;
 

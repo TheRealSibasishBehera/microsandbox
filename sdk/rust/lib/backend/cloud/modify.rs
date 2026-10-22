@@ -14,7 +14,8 @@ use std::time::Duration;
 use microsandbox_types::{
     CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_NOT_CONFIRMED, CLOUD_MODIFICATION_REFUSED,
     CLOUD_MODIFICATION_UNSUPPORTED, CloudErrorBody, CloudModificationRejection,
-    CloudSandboxModificationApplyRequest, CloudSandboxModificationPlanRequest, CloudSecretValue,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationPlan,
+    CloudSandboxModificationPlanRequest, CloudSecretValue,
 };
 use reqwest::Response;
 use tokio::time::Instant;
@@ -244,8 +245,8 @@ fn classify(sent: SendOutcome) -> Attempt {
         SendOutcome::Answered { status, body } => (status, body),
     };
     if status == 200 {
-        return match serde_json::from_str(&body) {
-            Ok(plan) => Attempt::Done(plan),
+        return match serde_json::from_str::<CloudSandboxModificationPlan>(&body) {
+            Ok(plan) => Attempt::Done(plan.into()),
             Err(_) => Attempt::Fail(result_unknown("the server's answer could not be read")),
         };
     }
