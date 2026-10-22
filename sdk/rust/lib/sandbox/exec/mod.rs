@@ -1,0 +1,14 @@
+//! Execution types for running commands inside sandboxes.
+
+mod io;
+mod session;
+
+//--------------------------------------------------------------------------------------------------
+// Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use session::{
+    ExecControl, ExecEvent, ExecHandle, ExecOptions, ExecOptionsBuilder, ExecOutput, ExecSink,
+    ExitStatus, Rlimit, RlimitResource, StdinMode,
+};
+pub(crate) use session::{agent, replaces_default_env, validate_rlimits};

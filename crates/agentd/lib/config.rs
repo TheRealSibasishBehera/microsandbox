@@ -19,6 +19,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use microsandbox_protocol::exec::ExecLimits;
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_CWD, ENV_HANDOFF_INIT_ENV, ENV_HOST_ALIAS,
@@ -136,6 +137,9 @@ pub struct AgentdConfig {
     /// Keys of the `default_env` entries that carry secret placeholders, or
     /// `None` when the runtime did not name them.
     pub(crate) secret_env_keys: Option<Vec<String>>,
+
+    /// Execution policy supplied by the owning runtime; absent for older launchers.
+    pub(crate) exec_limits: Option<ExecLimits>,
 }
 
 /// In-guest security profile.
@@ -313,6 +317,7 @@ impl BootParams {
             secret_env_keys,
             security_profile,
             handoff_init,
+            exec_limits,
         } = bootstrap;
 
         let security_profile = match security_profile {
@@ -441,6 +446,7 @@ impl BootParams {
                 default_cwd,
                 default_env,
                 secret_env_keys,
+                exec_limits,
             },
         ))
     }
@@ -591,6 +597,7 @@ impl AgentdConfig {
             default_cwd: None,
             default_env: Vec::new(),
             secret_env_keys: None,
+            exec_limits: None,
         })
     }
 }
@@ -1354,6 +1361,12 @@ fn parse_handoff_env_pair(key: String, value: String) -> AgentdResult<(OsString,
 //--------------------------------------------------------------------------------------------------
 
 fn validate_guest_bootstrap(bootstrap: &GuestBootstrap) -> AgentdResult<()> {
+    if let Some(policy) = bootstrap.exec_limits {
+        policy
+            .validate()
+            .map_err(|error| AgentdError::Init(error.into()))?;
+    }
+
     if let Some(root) = &bootstrap.block_root {
         match root {
             BootstrapBlockRoot::DiskImage { device, fstype } => {

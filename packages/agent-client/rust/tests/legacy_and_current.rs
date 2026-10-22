@@ -32,6 +32,7 @@ mod tests {
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -84,6 +85,7 @@ mod tests {
             .create(&pipe_path)
             .unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -127,6 +129,7 @@ mod tests {
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -179,6 +182,7 @@ mod tests {
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -278,6 +282,7 @@ mod tests {
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -318,6 +323,7 @@ mod tests {
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -368,6 +374,7 @@ mod tests {
 
         let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
