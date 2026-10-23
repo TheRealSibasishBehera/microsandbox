@@ -1502,16 +1502,24 @@ fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModification
 /// sandbox can take live.
 fn apply_spec_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModificationPatch) {
     for var in &patch.env {
-        if let Some(existing) = config
+        let Some(last) = config
             .spec
             .env
-            .iter_mut()
-            .find(|entry| entry.key == var.key)
-        {
-            existing.value = var.value.clone();
-        } else {
+            .iter()
+            .rposition(|entry| entry.key == var.key)
+        else {
             config.spec.env.push(var.clone());
+            continue;
+        };
+        // A key already at this value is left as is, earlier entries included.
+        if config.spec.env[last].value == var.value {
+            continue;
         }
+        // Set the last entry, the one commands see, and drop the key's earlier ones.
+        let mut rest = config.spec.env.split_off(last);
+        rest[0].value = var.value.clone();
+        config.spec.env.retain(|entry| entry.key != var.key);
+        config.spec.env.append(&mut rest);
     }
     config
         .spec
@@ -2584,9 +2592,9 @@ fn push_spec_changes(
     }
 }
 
-/// The env entry `config` sets for `key`.
+/// The env entry commands see for `key`: entries apply in order, so the last one.
 fn env_entry<'a>(config: &'a SandboxConfig, key: &str) -> Option<&'a EnvVar> {
-    config.spec.env.iter().find(|entry| entry.key == key)
+    config.spec.env.iter().rfind(|entry| entry.key == key)
 }
 
 fn push_spec_conflicts(
@@ -4900,6 +4908,53 @@ mod tests {
             assert_eq!(change.before.as_deref(), before, "{name}");
             assert_eq!(change.disposition, ModificationDisposition::Live, "{name}");
         }
+    }
+
+    #[test]
+    fn a_repeated_env_key_plans_and_applies_live_against_its_last_entry() {
+        let mut current = config(2, 1024);
+        current.spec.env = vec![
+            EnvVar::new("KEY", "first"),
+            EnvVar::new("OTHER", "1"),
+            EnvVar::new("KEY", "second"),
+        ];
+        let plan = |value: &str| {
+            build_plan(
+                "api".into(),
+                SandboxStatus::Running,
+                &current,
+                Some(&current),
+                LiveControl::default(),
+                true,
+                SandboxModificationPatch {
+                    env: vec![EnvVar::new("KEY", value)],
+                    ..Default::default()
+                },
+                ModificationPolicy::NoRestart,
+            )
+        };
+
+        // Commands see the last entry, so a value only an earlier entry holds still changes.
+        assert!(plan("second").changes.is_empty());
+        let plan = plan("first");
+        let [PlannedChange::Config(change)] = plan.changes.as_slice() else {
+            panic!("expected one config change");
+        };
+        assert_eq!(change.before.as_deref(), Some("KEY=second"));
+        assert_eq!(change.disposition, ModificationDisposition::Live);
+
+        let mut active = current.clone();
+        apply_spec_patch_to_config(
+            &mut active,
+            &SandboxModificationPatch {
+                env: vec![EnvVar::new("KEY", "third")],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            active.spec.env,
+            vec![EnvVar::new("OTHER", "1"), EnvVar::new("KEY", "third")]
+        );
     }
 
     #[test]
