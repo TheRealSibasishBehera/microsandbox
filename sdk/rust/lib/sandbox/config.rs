@@ -30,7 +30,7 @@ use crate::config::{
 };
 
 use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
-use crate::snapshot::SnapshotReference;
+use crate::snapshot::{SnapshotReference, SnapshotScope};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -129,6 +129,7 @@ pub(crate) enum SnapshotRestoreMode {
 /// local SDK/runtime operation state beside that shared contract, such as
 /// registry credentials, replacement flags, and resolved snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 pub struct SandboxConfig {
     /// Protect the installed source while a local restore builder materializes child-owned files.
     #[cfg(feature = "local")]
@@ -298,10 +299,9 @@ pub struct SandboxConfig {
     #[cfg(feature = "local")]
     pub(crate) snapshot_upper_layers: Vec<RootfsUpperLayerConfig>,
 
-    /// Destination boot settings that require scope admission before snapshot materialization.
-    /// Captured execution does not rerun guest bootstrap; explicit choices cannot be ignored.
+    /// Settings explicitly supplied by the caller, before defaults and managed policy are applied.
     #[serde(skip)]
-    pub(crate) restore_boot_overrides: super::restore_builder::RestoreBootOverrides,
+    pub(crate) caller_config_overrides: Option<Box<SandboxConfigPatch>>,
 
     /// Transient process-launch intent for the current create operation.
     #[serde(skip)]
@@ -554,6 +554,18 @@ impl OciSandboxDefaultsPatch {
 }
 
 impl SandboxConfig {
+    /// Validate only caller-supplied boot choices, never resolved defaults.
+    pub(crate) fn validate_restore_options(
+        &self,
+        scope: SnapshotScope,
+        mode: SnapshotRestoreMode,
+    ) -> MicrosandboxResult<()> {
+        if let Some(options) = &self.caller_config_overrides {
+            options.validate_for_restore(scope, mode)?;
+        }
+        Ok(())
+    }
+
     /// Discard captured metadata and source paths before selecting another restore source.
     pub(crate) fn clear_prepared_restore(&mut self) {
         #[cfg(feature = "local")]
@@ -573,7 +585,7 @@ impl SandboxConfig {
         mut options: SandboxConfigPatch,
         image_defaults: Option<SandboxConfigPatch>,
     ) -> MicrosandboxResult<()> {
-        // Explicit requests must match captured snapshot state: caller options and
+        // Explicit requests must match captured snapshot state: caller overrides and
         // managed overrides each error on conflict. Global defaults are exempt; they
         // yield silently when captured geometry is applied in the merge below.
         if let Some(restore) = &options.restore_resources {
@@ -690,7 +702,7 @@ impl SandboxConfig {
         {
             config.snapshot_upper_layers.clear();
         }
-        config.restore_boot_overrides = Default::default();
+        // Caller overrides are persisted separately from the resolved configuration.
         config.launch_intent = LaunchIntent::None;
         config.launch_cmd_before_override = None;
         config.init_owns_workload = false;
@@ -1217,7 +1229,7 @@ impl Default for SandboxConfig {
             resumed_from_full_snapshot: false,
             #[cfg(feature = "local")]
             snapshot_upper_layers: Vec::new(),
-            restore_boot_overrides: Default::default(),
+            caller_config_overrides: None,
             launch_intent: LaunchIntent::None,
             launch_cmd_before_override: None,
             init_owns_workload: false,
@@ -1663,29 +1675,6 @@ mod tests {
         );
         assert_eq!(config.spec.runtime.cmd, Some(vec!["bash".to_string()]));
         assert!(config.should_launch_background_command());
-    }
-
-    #[test]
-    fn test_restore_boot_intent_is_operation_local() {
-        let config = SandboxConfig {
-            restore_boot_overrides: super::super::restore_builder::RestoreBootOverrides {
-                security: true,
-            },
-            ..Default::default()
-        };
-
-        // A later ordinary start must not replay the previous restore's admission decision.
-        assert!(config.restore_boot_overrides.security);
-        assert!(
-            !config
-                .clone_for_persistence()
-                .restore_boot_overrides
-                .security
-        );
-        let encoded = serde_json::to_value(&config).unwrap();
-        assert!(encoded.get("restore_boot_overrides").is_none());
-        let decoded: SandboxConfig = serde_json::from_value(encoded).unwrap();
-        assert!(!decoded.restore_boot_overrides.security);
     }
 
     #[test]
