@@ -11,6 +11,7 @@ mod branch_batch;
 mod builder;
 #[cfg(feature = "local")]
 pub(crate) use builder::prepare_local_snapshot_restore;
+mod caller_config_overrides;
 #[cfg(feature = "cloud")]
 mod cloud;
 mod compact;
@@ -126,12 +127,6 @@ pub(crate) use builder::{
     apply_checkpoint_restore_constraints, apply_snapshot_guest_clock, apply_snapshot_root_layout,
 };
 #[cfg(feature = "local")]
-pub(crate) use modify::control_checkpoint_create;
-#[cfg(feature = "local")]
-pub(crate) use modify::control_disk_checkpoint_create;
-#[cfg(feature = "local")]
-pub(crate) use modify::restore_requested_resources;
-#[cfg(feature = "local")]
 pub(crate) use patch::{apply_patches, build_flat_tree, build_upper_tree};
 #[cfg(all(feature = "local", windows))]
 pub(crate) use reap::reap_leaked_runtime_process;
@@ -183,7 +178,7 @@ pub use microsandbox_network::policy::{
     Action as NetworkAction, NetworkPolicy, NetworkProfile, Rule as NetworkRule,
 };
 #[cfg(feature = "net")]
-pub use microsandbox_network::{OutboundProxy, Socks5Credentials};
+pub use microsandbox_network::{HttpConnectCredentials, OutboundProxy, Socks5Credentials};
 #[cfg(feature = "local")]
 pub use microsandbox_runtime::control::PauseControlState as SandboxPauseState;
 pub use microsandbox_types::SandboxLogLevel as LogLevel;
@@ -203,7 +198,6 @@ pub use microsandbox_types::{
 };
 pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
 #[cfg(feature = "local")]
-pub(crate) use restore_builder::RestoreBootOverrides;
 pub use restore_builder::RestoreBuilder;
 
 #[cfg(feature = "local")]

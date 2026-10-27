@@ -87,8 +87,7 @@ impl CloudBackend {
         builder: SandboxBuilder,
         start: bool,
     ) -> MicrosandboxResult<Sandbox> {
-        let config = self.build_sandbox_config(builder).await?;
-        let (req, config) = cloud_create_body_and_config(config)?;
+        let (req, config) = self.build_create_request(builder).await?;
         let cloud = self.create_sandbox(&req, start).await?;
         if start {
             ensure_cloud_sandbox_ready(&cloud)?;
@@ -97,24 +96,24 @@ impl CloudBackend {
         Ok(Sandbox::from_cloud(backend, cloud, config))
     }
 
+    /// Resolve the request body and runtime config for a cloud create.
+    pub(in crate::backend) async fn build_create_request(
+        &self,
+        builder: SandboxBuilder,
+    ) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
+        let config = self.build_sandbox_config(builder).await?;
+        cloud_create_body_and_config(config)
+    }
+
     /// Resolve cloud request settings for both explicit build and immediate creation.
     pub(crate) async fn build_sandbox_config(
         &self,
         mut builder: SandboxBuilder,
     ) -> MicrosandboxResult<SandboxConfig> {
-        let options = builder.prepare(Arc::new(self.clone())).await?;
-        // Cloud has no hotplug aperture. Equal maxima on concrete configs track the
-        // requested size, so let them follow any managed CPU or memory override.
-        let resources = &mut options.spec.resources;
-        if resources.max_cpus == resources.cpus {
-            resources.max_cpus = None;
-        }
-        if resources.max_memory_mib == resources.memory_mib {
-            resources.max_memory_mib = None;
-        }
+        builder.prepare(Arc::new(self.clone())).await?;
 
         // The cloud worker resolves image metadata. Device policy is applied on this client.
-        builder.finish(Some(self.config_sources()), None)
+        builder.finish_cloud(self.config_sources())
     }
 
     async fn restart_running_sandbox(
@@ -945,7 +944,15 @@ mod tests {
     async fn every_cloud_create_entry_point_sends_captured_file_policy() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-        for entry in 0..6 {
+        for (entry, cpus, memory, explicit_max) in (0..6).flat_map(|entry| {
+            [
+                (1, 512, false),
+                (1, 512, true),
+                (8, 2048, false),
+                (8, 2048, true),
+            ]
+            .map(|(cpus, memory, explicit_max)| (entry, cpus, memory, explicit_max))
+        }) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
@@ -1006,12 +1013,17 @@ mod tests {
             );
             let backend: Arc<dyn Backend> = Arc::new(backend);
             let request = || {
-                SandboxBuilder::new("policy-request")
+                let builder = SandboxBuilder::new("policy-request")
                     .image("alpine")
-                    .cpus(8)
-                    .memory(2048)
+                    .cpus(cpus)
+                    .memory(memory)
                     .workdir("/request")
-                    .shell("/bin/request")
+                    .shell("/bin/request");
+                if explicit_max {
+                    builder.max_cpus(cpus).max_memory(memory)
+                } else {
+                    builder
+                }
             };
             let empty =
                 crate::config::layers::BackendConfig::new(Default::default(), Default::default());
@@ -1784,7 +1796,9 @@ mod tests {
         config.spec.resources.memory_mib = 1024;
         config.spec.resources.max_memory_mib = 1024;
         config.spec.security_profile = microsandbox_types::SecurityProfile::Restricted;
-        config.restore_boot_overrides.security = true;
+        let mut options = crate::SandboxConfigPatch::new();
+        options.spec.security_profile = Some(config.spec.security_profile);
+        config.caller_config_overrides = Some(Box::new(options));
         config.spec.lifecycle.max_duration_secs = Some(60);
         config.spec.lifecycle.idle_timeout_secs = Some(10);
 
