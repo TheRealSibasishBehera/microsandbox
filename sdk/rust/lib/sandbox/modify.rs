@@ -579,10 +579,10 @@ impl SandboxModificationBuilder {
             && handle.identity() == refresh.identity
         {
             let keeps_running = !restart_required && !stopped_status(status);
-            refresh.config.store(match active {
-                Some(active) if keeps_running => active,
-                Some(_) | None => config,
-            });
+            refresh.config.store(SandboxConfig::running_or_saved(
+                active.filter(|_| keeps_running),
+                config,
+            ));
         }
         if restart_required {
             start_after_modify(&handle).await?;
@@ -4811,16 +4811,7 @@ mod tests {
         chosen.spec.runtime.workdir = Some(Some("/app".into()));
         current.caller_config_overrides = Some(Box::new(chosen));
         let sandbox_id = seed_running_labeled(&local, &current, &current).await;
-        let current_json = serde_json::to_string(&current).unwrap();
-        sandbox_entity::Entity::update_many()
-            .col_expr(
-                sandbox_entity::Column::CallerConfigOverrides,
-                Expr::value(current.caller_config_overrides_json(&current_json).unwrap()),
-            )
-            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
-            .exec(local.db().await.unwrap().write())
-            .await
-            .unwrap();
+        save_caller_overrides(&local, sandbox_id, &current).await;
         let agent = serve_fake_agent(
             &local,
             &current.spec.name,
@@ -4944,6 +4935,76 @@ mod tests {
         );
         // The handle keeps reporting the saved config.
         assert_eq!(handle.config().unwrap().spec.env, saved.spec.env);
+    }
+
+    /// Record `saved`'s caller overrides on its row, as create does.
+    async fn save_caller_overrides(local: &LocalBackend, sandbox_id: i32, saved: &SandboxConfig) {
+        let saved_json = serde_json::to_string(saved).unwrap();
+        sandbox_entity::Entity::update_many()
+            .col_expr(
+                sandbox_entity::Column::CallerConfigOverrides,
+                Expr::value(saved.caller_config_overrides_json(&saved_json).unwrap()),
+            )
+            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+            .exec(local.db().await.unwrap().write())
+            .await
+            .unwrap();
+    }
+
+    /// A config whose caller cleared the workdir at create time.
+    fn workdir_cleared_by_caller() -> SandboxConfig {
+        let mut config = exec_default_config();
+        config.spec.image = RootfsSource::oci("alpine");
+        config.spec.runtime.workdir = None;
+        let mut chosen = crate::SandboxConfigPatch::new();
+        chosen.spec.runtime.workdir = Some(None);
+        config.caller_config_overrides = Some(Box::new(chosen));
+        config
+    }
+
+    /// Rebuild `config` over a default workdir, which a cleared workdir must not take.
+    fn rebuilt_workdir(config: &SandboxConfig) -> Option<String> {
+        let defaults = crate::config::layers::BackendConfig::new(
+            serde_json::from_str(r#"{"sandbox_defaults":{"workdir":"/new-default"}}"#).unwrap(),
+            Default::default(),
+        );
+        crate::sandbox::SandboxBuilder::from(config.clone())
+            .finish(Some(&defaults), None)
+            .unwrap()
+            .spec
+            .runtime
+            .workdir
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_keeps_the_saved_caller_overrides_on_the_running_config() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let (local, backend) = label_backend(temp.path()).await;
+        let saved = workdir_cleared_by_caller();
+        let mut running = saved.clone();
+        running.spec.env.push(EnvVar::new("ADDED", "1"));
+        let sandbox_id = seed_running_labeled(&local, &saved, &running).await;
+        save_caller_overrides(&local, sandbox_id, &saved).await;
+        let agent = serve_fake_agent(
+            &local,
+            &saved.spec.name,
+            Default::default(),
+            FakeStat::Directory,
+        );
+
+        let sandbox = backend
+            .sandboxes()
+            .get(backend.clone(), &saved.spec.name)
+            .await
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        agent.abort();
+
+        assert_eq!(sandbox.config().spec.env, running.spec.env);
+        assert_eq!(rebuilt_workdir(&sandbox.config()), None);
     }
 
     #[cfg(unix)]
@@ -5146,6 +5207,20 @@ mod tests {
         ];
         assert_eq!(kept.config().spec.env, running);
         assert!(crate::sandbox::exec::replaces_default_env(backend.as_ref()));
+    }
+
+    #[tokio::test]
+    async fn running_sandbox_object_keeps_the_saved_caller_overrides_after_its_own_modify() {
+        let temp = tempdir().unwrap();
+        let (local, backend) = label_backend(temp.path()).await;
+        let saved = workdir_cleared_by_caller();
+        let (sandbox, _relay, sandbox_id) = running_sandbox_object(&backend, saved.clone()).await;
+        save_caller_overrides(&local, sandbox_id, &saved).await;
+
+        sandbox.modify().env("NEW", "1").apply().await.unwrap();
+
+        assert!(sandbox.config().spec.env.contains(&EnvVar::new("NEW", "1")));
+        assert_eq!(rebuilt_workdir(&sandbox.config()), None);
     }
 
     #[test]

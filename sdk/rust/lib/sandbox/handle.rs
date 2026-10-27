@@ -612,10 +612,8 @@ impl SandboxHandle {
                 // Execs build their env and workdir from this config, so take the
                 // copy the running VM uses as of the handshake. Sandboxes started
                 // before that copy was recorded fall back to the saved config.
-                let config = match current.active_config()? {
-                    Some(active) => active,
-                    None => current.config()?,
-                };
+                let config =
+                    SandboxConfig::running_or_saved(current.active_config()?, current.config()?);
 
                 Ok(Sandbox::from_local(
                     self.backend.clone(),
