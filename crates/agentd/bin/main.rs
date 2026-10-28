@@ -80,7 +80,8 @@ fn main() {
     }
 
     // After any handoff, so only agentd is raised. Keeping the inherited limit only bounds how many
-    // guest connections can be open at once, so a failure is not fatal.
+    // descriptors agentd can hold (relayed connections, exec pipes and PTYs, file handles), so a
+    // failure is not fatal.
     if let Err(e) = raise_own_open_file_limit() {
         eprintln!("agentd: keeping the inherited open-file limit: {e}");
     }
