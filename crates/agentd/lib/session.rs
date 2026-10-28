@@ -1,12 +1,12 @@
 //! Exec session management: spawning processes with PTY or pipe I/O.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::{iter, mem, ptr};
 
@@ -41,7 +41,7 @@ const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_int = 4;
 const DEFAULT_USER_SPEC: &str = "0:0";
 
 /// Aggregate guest-to-host data retained outside the serial output buffer.
-const SESSION_OUTPUT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
+pub(crate) const SESSION_OUTPUT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
 
 /// Allocation granularity used by the data budget.
 const SESSION_OUTPUT_BUDGET_GRANULE: usize = 4096;
@@ -52,8 +52,9 @@ const SESSION_OUTPUT_ITEM_CAPACITY: usize = 1024;
 /// Maximum number of records waiting for the independently scheduled bulk writer.
 const SESSION_BULK_OUTPUT_ITEM_CAPACITY: usize = 256;
 
-/// Maximum lifecycle commands waiting for the dedicated bulk scheduler.
-const SESSION_BULK_COMMAND_CAPACITY: usize = 128;
+/// Lifecycle commands waiting for the dedicated bulk scheduler. Every sender awaits its command's
+/// completion before sending another, so one slot suffices.
+const SESSION_BULK_COMMAND_CAPACITY: usize = 1;
 
 //--------------------------------------------------------------------------------------------------
 // Functions: classify
@@ -228,6 +229,11 @@ pub struct SessionOutputEnvelope {
 }
 
 /// Lifecycle commands processed ahead of queued dedicated-lane output.
+///
+/// Every sender awaits the command's completion. The scheduler applies all recorded cancellations
+/// ([`BulkPurges`]) before any command, which keeps cancellations and commands in the order they
+/// were issued only because no command is sent while an earlier one is outstanding. A command
+/// sent without awaiting its completion would let later cancellations overtake it.
 pub enum BulkOutputCommand {
     /// Park after the currently written complete record, retaining all queued source output.
     Park {
@@ -246,23 +252,41 @@ pub enum BulkOutputCommand {
         /// Resolves after the scheduler has crossed the cut.
         completion: oneshot::Sender<()>,
     },
-    /// Release queued records for one cancelled operation.
-    DropFlow {
-        /// Range owner that opened the operation.
-        incarnation: ClientIncarnation,
-        /// Correlation being cancelled.
-        id: u32,
-        /// Resolves after matching queued records and their permits are dropped.
-        completion: oneshot::Sender<()>,
-    },
+}
 
-    /// Release every queued record owned by one disconnected SDK client.
-    DropIncarnation {
-        /// Range ownership period being removed.
-        incarnation: ClientIncarnation,
-        /// Resolves after matching queued records and their permits are dropped.
-        completion: oneshot::Sender<()>,
-    },
+/// Cancellations recorded for the dedicated bulk scheduler and not yet applied.
+///
+/// Recording never waits, so a burst of cancellations handled in one agent-loop turn cannot
+/// overflow it. Repeats of one operation collapse into one entry, and each disconnected client
+/// appears once. The scheduler applies them at its next scheduling point, before any later
+/// lifecycle command.
+#[derive(Default)]
+pub struct BulkPurges {
+    /// Cancelled operations: queued records are released and late records discarded.
+    pub(crate) flows: HashSet<(ClientIncarnation, u32)>,
+
+    /// Disconnected SDK clients, each resolved after every queued record it owned is released.
+    pub(crate) incarnations: Vec<(ClientIncarnation, oneshot::Sender<()>)>,
+}
+
+/// Scheduler side of the dedicated bulk lane's lifecycle inputs.
+pub struct BulkSchedulerInbox {
+    /// Park, resume, and restore requests, each awaited by its sender.
+    pub(crate) commands: mpsc::Receiver<BulkOutputCommand>,
+
+    /// Cancellations shared with every producer handle.
+    purges: Arc<Mutex<BulkPurges>>,
+
+    /// Signals that cancellations were recorded; closes once every producer handle is gone.
+    pub(crate) purge_wake: mpsc::Receiver<()>,
+}
+
+/// Producer side of the dedicated bulk scheduler's lifecycle inputs.
+#[derive(Clone)]
+struct BulkSchedulerHandle {
+    commands: mpsc::Sender<BulkOutputCommand>,
+    purges: Arc<Mutex<BulkPurges>>,
+    purge_wake: mpsc::Sender<()>,
 }
 
 /// Capacity reserved before a producer reads or encodes a data-bearing event.
@@ -274,7 +298,7 @@ pub struct SessionOutputSender {
     generation: u64,
     control_tx: mpsc::Sender<SessionOutputEnvelope>,
     bulk_tx: Option<mpsc::Sender<SessionOutputEnvelope>>,
-    bulk_command_tx: Option<mpsc::Sender<BulkOutputCommand>>,
+    bulk_scheduler: Option<BulkSchedulerHandle>,
     control_budget: Arc<Semaphore>,
     bulk_budget: Arc<Semaphore>,
     incarnation: Option<ClientIncarnation>,
@@ -430,7 +454,7 @@ impl SessionOutputSender {
                 generation: 0,
                 control_tx: tx,
                 bulk_tx: None,
-                bulk_command_tx: None,
+                bulk_scheduler: None,
                 control_budget: Arc::clone(&budget),
                 bulk_budget: budget,
                 incarnation: None,
@@ -444,24 +468,35 @@ impl SessionOutputSender {
         Self,
         mpsc::Receiver<SessionOutputEnvelope>,
         mpsc::Receiver<SessionOutputEnvelope>,
-        mpsc::Receiver<BulkOutputCommand>,
+        BulkSchedulerInbox,
     ) {
         let (control_tx, control_rx) = mpsc::channel(SESSION_OUTPUT_ITEM_CAPACITY);
         let (bulk_tx, bulk_rx) = mpsc::channel(SESSION_BULK_OUTPUT_ITEM_CAPACITY);
-        let (bulk_command_tx, bulk_command_rx) = mpsc::channel(SESSION_BULK_COMMAND_CAPACITY);
+        let (command_tx, command_rx) = mpsc::channel(SESSION_BULK_COMMAND_CAPACITY);
+        // One pending wake covers any number of recorded cancellations.
+        let (purge_wake_tx, purge_wake_rx) = mpsc::channel(1);
+        let purges = Arc::new(Mutex::new(BulkPurges::default()));
         (
             Self {
                 generation: 0,
                 control_tx,
                 bulk_tx: Some(bulk_tx),
-                bulk_command_tx: Some(bulk_command_tx),
+                bulk_scheduler: Some(BulkSchedulerHandle {
+                    commands: command_tx,
+                    purges: Arc::clone(&purges),
+                    purge_wake: purge_wake_tx,
+                }),
                 control_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
                 bulk_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
                 incarnation: None,
             },
             control_rx,
             bulk_rx,
-            bulk_command_rx,
+            BulkSchedulerInbox {
+                commands: command_rx,
+                purges,
+                purge_wake: purge_wake_rx,
+            },
         )
     }
 
@@ -471,7 +506,7 @@ impl SessionOutputSender {
             generation: self.generation,
             control_tx: self.control_tx.clone(),
             bulk_tx: self.bulk_tx.clone(),
-            bulk_command_tx: self.bulk_command_tx.clone(),
+            bulk_scheduler: self.bulk_scheduler.clone(),
             control_budget: Arc::clone(&self.control_budget),
             bulk_budget: Arc::clone(&self.bulk_budget),
             incarnation,
@@ -484,11 +519,12 @@ impl SessionOutputSender {
     }
 
     pub(crate) async fn park_bulk_output(&self) -> Result<u64, &'static str> {
-        let Some(commands) = &self.bulk_command_tx else {
+        let Some(scheduler) = &self.bulk_scheduler else {
             return Ok(0);
         };
         let (completion, completed) = oneshot::channel();
-        commands
+        scheduler
+            .commands
             .send(BulkOutputCommand::Park { completion })
             .await
             .map_err(|_| "bulk scheduler closed while parking")?;
@@ -496,11 +532,12 @@ impl SessionOutputSender {
     }
 
     pub(crate) async fn resume_bulk_output(&self) -> Result<(), &'static str> {
-        let Some(commands) = &self.bulk_command_tx else {
+        let Some(scheduler) = &self.bulk_scheduler else {
             return Ok(());
         };
         let (completion, completed) = oneshot::channel();
-        commands
+        scheduler
+            .commands
             .send(BulkOutputCommand::Resume { completion })
             .await
             .map_err(|_| "bulk scheduler closed while resuming")?;
@@ -514,9 +551,10 @@ impl SessionOutputSender {
             .generation
             .checked_add(1)
             .ok_or("attachment generation exhausted")?;
-        if let Some(commands) = &self.bulk_command_tx {
+        if let Some(scheduler) = &self.bulk_scheduler {
             let (completion, completed) = oneshot::channel();
-            commands
+            scheduler
+                .commands
                 .send(BulkOutputCommand::Restore {
                     generation: self.generation,
                     completion,
@@ -535,43 +573,34 @@ impl SessionOutputSender {
         // Combined mode has no cross-lane merger. Raw records, finish markers, and terminal output
         // must therefore enter one FIFO before sharing the physical console stream.
         self.bulk_tx = None;
-        self.bulk_command_tx = None;
+        self.bulk_scheduler = None;
     }
 
-    /// Queue a high-priority purge for one operation without awaiting bulk-port progress.
-    pub fn drop_bulk_flow(&self, id: u32) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
+    /// Record a high-priority purge for one operation without awaiting bulk-port progress.
+    pub fn drop_bulk_flow(&self, id: u32) -> Result<(), &'static str> {
         let Some(incarnation) = self.incarnation else {
-            return Ok(None);
+            return Ok(());
         };
-        let Some(commands) = self.bulk_command_tx.as_ref() else {
-            return Ok(None);
+        let Some(scheduler) = self.bulk_scheduler.as_ref() else {
+            return Ok(());
         };
-        let (completion, completed) = oneshot::channel();
-        commands
-            .try_send(BulkOutputCommand::DropFlow {
-                incarnation,
-                id,
-                completion,
-            })
-            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
-        Ok(Some(completed))
+        scheduler.post_purge(|purges| {
+            purges.flows.insert((incarnation, id));
+        })
     }
 
-    /// Queue a high-priority purge for a disconnected range owner.
+    /// Record a high-priority purge for a disconnected range owner.
+    ///
+    /// The returned receiver resolves after every queued record the owner had is released.
     pub fn drop_bulk_incarnation(
         &self,
         incarnation: ClientIncarnation,
     ) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
-        let Some(commands) = self.bulk_command_tx.as_ref() else {
+        let Some(scheduler) = self.bulk_scheduler.as_ref() else {
             return Ok(None);
         };
         let (completion, completed) = oneshot::channel();
-        commands
-            .try_send(BulkOutputCommand::DropIncarnation {
-                incarnation,
-                completion,
-            })
-            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
+        scheduler.post_purge(|purges| purges.incarnations.push((incarnation, completion)))?;
         Ok(Some(completed))
     }
 
@@ -650,6 +679,27 @@ impl SessionOutputSender {
         })
         .await
         .is_ok()
+    }
+}
+
+impl BulkSchedulerInbox {
+    /// Take every cancellation recorded since the previous call.
+    pub(crate) fn take_purges(&self) -> BulkPurges {
+        mem::take(&mut *lock_bulk_purges(&self.purges))
+    }
+}
+
+impl BulkSchedulerHandle {
+    /// Record a cancellation and wake the scheduler without waiting for it.
+    fn post_purge(&self, record: impl FnOnce(&mut BulkPurges)) -> Result<(), &'static str> {
+        record(&mut lock_bulk_purges(&self.purges));
+        match self.purge_wake.try_send(()) {
+            // A full wake channel already holds a wake that the scheduler has not consumed.
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                Err("dedicated bulk scheduler is unavailable")
+            }
+        }
     }
 }
 
@@ -1390,6 +1440,11 @@ impl Drop for ExecSession {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Each critical section is one insert or one take, so a poisoned lock still holds whole entries.
+fn lock_bulk_purges(purges: &Mutex<BulkPurges>) -> MutexGuard<'_, BulkPurges> {
+    purges.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn spawn_piped_process(
     mut command: Command,
     process_manager: &ProcessManager,
@@ -2125,8 +2180,7 @@ mod tests {
     #[tokio::test]
     async fn split_output_queues_keep_bulk_lifecycle_commands_independent() {
         let incarnation = [0x55; 16];
-        let (tx, mut control_rx, mut bulk_rx, mut command_rx) =
-            SessionOutputSender::split_channel();
+        let (tx, mut control_rx, mut bulk_rx, mut inbox) = SessionOutputSender::split_channel();
         let scoped = tx.with_incarnation(Some(incarnation));
         let record = BulkRecord {
             id: 9,
@@ -2144,7 +2198,7 @@ mod tests {
                 .await
         );
         assert!(scoped.send(10, SessionOutput::Exited(0)).await);
-        let mut completed = scoped.drop_bulk_flow(9).unwrap().unwrap();
+        scoped.drop_bulk_flow(9).unwrap();
 
         assert!(matches!(
             bulk_rx.recv().await.unwrap().output,
@@ -2154,24 +2208,67 @@ mod tests {
             control_rx.recv().await.unwrap().output,
             SessionOutput::Exited(0)
         ));
-        let BulkOutputCommand::DropFlow {
-            incarnation: command_incarnation,
-            id,
-            completion,
-        } = command_rx.recv().await.unwrap()
-        else {
-            panic!("expected flow cleanup command");
-        };
-        assert_eq!(command_incarnation, incarnation);
-        assert_eq!(id, 9);
-        completion.send(()).unwrap();
-        assert_eq!(completed.try_recv(), Ok(()));
+        assert_eq!(inbox.purge_wake.recv().await, Some(()));
+        let purges = inbox.take_purges();
+        assert_eq!(purges.flows, HashSet::from([(incarnation, 9)]));
+        assert!(purges.incarnations.is_empty());
+    }
+
+    #[test]
+    fn bulk_cancellation_bursts_are_all_recorded() {
+        let (tx, _control_rx, _bulk_rx, mut inbox) = SessionOutputSender::split_channel();
+        let owners = [[0x61; 16], [0x62; 16], [0x63; 16]];
+        let streams = 200;
+
+        // Nothing drains the scheduler side here, as on the single-threaded agent loop.
+        let mut expected = HashSet::new();
+        let mut completions = Vec::new();
+        for owner in owners {
+            let scoped = tx.with_incarnation(Some(owner));
+            for id in 1..=streams {
+                scoped.drop_bulk_flow(id).unwrap();
+                scoped.drop_bulk_flow(id).unwrap();
+                expected.insert((owner, id));
+            }
+            completions.push(tx.drop_bulk_incarnation(owner).unwrap().unwrap());
+        }
+
+        let purges = inbox.take_purges();
+        assert_eq!(purges.flows, expected);
+        assert_eq!(
+            purges
+                .incarnations
+                .iter()
+                .map(|(owner, _)| *owner)
+                .collect::<Vec<_>>(),
+            owners
+        );
+        assert_eq!(inbox.purge_wake.try_recv(), Ok(()));
+        assert!(inbox.purge_wake.try_recv().is_err());
+        let drained = inbox.take_purges();
+        assert!(drained.flows.is_empty() && drained.incarnations.is_empty());
+
+        for (_, completion) in purges.incarnations {
+            completion.send(()).unwrap();
+        }
+        for mut completed in completions {
+            assert_eq!(completed.try_recv(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn bulk_cancellation_fails_once_the_scheduler_is_gone() {
+        let (tx, _control_rx, _bulk_rx, inbox) = SessionOutputSender::split_channel();
+        let owner = [0x64; 16];
+        drop(inbox);
+
+        assert!(tx.with_incarnation(Some(owner)).drop_bulk_flow(1).is_err());
+        assert!(tx.drop_bulk_incarnation(owner).is_err());
     }
 
     #[tokio::test]
     async fn combined_mode_restores_one_ordered_output_queue() {
-        let (mut tx, mut control_rx, mut bulk_rx, _command_rx) =
-            SessionOutputSender::split_channel();
+        let (mut tx, mut control_rx, mut bulk_rx, _inbox) = SessionOutputSender::split_channel();
         tx.disable_bulk_scheduler();
         let record = BulkRecord {
             id: 9,

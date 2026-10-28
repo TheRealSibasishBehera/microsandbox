@@ -57,8 +57,9 @@ use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
 use crate::process::ProcessManager;
 use crate::serial::{AGENT_BULK_PORT_NAME, AGENT_PORT_NAME, InputCharge, InputLane, InputWindow};
 use crate::session::{
-    BulkOutputCommand, ExecSession, RawActivity, RawSessionCompletion, RawSessionOutput,
-    SessionOutput, SessionOutputEnvelope, SessionOutputSender, resolve_default_user,
+    BulkOutputCommand, BulkPurges, BulkSchedulerInbox, ExecSession, RawActivity,
+    RawSessionCompletion, RawSessionOutput, SessionOutput, SessionOutputEnvelope,
+    SessionOutputSender, resolve_default_user,
 };
 use crate::tcp::TcpSession;
 use crate::workload::{WorkloadLatch, WorkloadLatchError};
@@ -517,7 +518,7 @@ pub async fn run(
     }
 
     // Channel for session output events.
-    let (mut session_tx, mut session_rx, bulk_session_rx, bulk_command_rx) =
+    let (mut session_tx, mut session_rx, bulk_session_rx, bulk_scheduler_inbox) =
         SessionOutputSender::split_channel();
 
     // Heartbeat/activity state.
@@ -568,7 +569,7 @@ pub async fn run(
             Some(port) => {
                 let input = BulkInputState::new(port.file.try_clone()?)?;
                 let (failure_rx, activity_rx) =
-                    spawn_bulk_writer_task(port.file, bulk_session_rx, bulk_command_rx);
+                    spawn_bulk_writer_task(port.file, bulk_session_rx, bulk_scheduler_inbox);
                 (None, Some(input), Some(failure_rx), Some(activity_rx))
             }
             None => {
@@ -1206,7 +1207,7 @@ pub async fn run(
 fn spawn_bulk_writer_task(
     writer_file: File,
     output_rx: tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
-    command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
+    inbox: BulkSchedulerInbox,
 ) -> (
     tokio::sync::mpsc::Receiver<String>,
     tokio::sync::mpsc::Receiver<RawActivity>,
@@ -1215,8 +1216,7 @@ fn spawn_bulk_writer_task(
     let (activity_tx, activity_rx) = tokio::sync::mpsc::channel(128);
 
     tokio::spawn(async move {
-        if let Err(error) = bulk_writer_task(writer_file, output_rx, command_rx, activity_tx).await
-        {
+        if let Err(error) = bulk_writer_task(writer_file, output_rx, inbox, activity_tx).await {
             let _ = failure_tx.send(error.to_string()).await;
         }
     });
@@ -1259,7 +1259,7 @@ async fn recv_optional<T>(receiver: &mut Option<tokio::sync::mpsc::Receiver<T>>)
 async fn bulk_writer_task(
     file: File,
     mut output_rx: tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
-    mut command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
+    mut inbox: BulkSchedulerInbox,
     activity_tx: tokio::sync::mpsc::Sender<RawActivity>,
 ) -> AgentdResult<()> {
     // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
@@ -1276,7 +1276,17 @@ async fn bulk_writer_task(
         let mut cleanups = Vec::new();
         tokio::select! {
             biased;
-            Some(command) = command_rx.recv() => {
+            Some(()) = inbox.purge_wake.recv() => {}
+            Some(command) = inbox.commands.recv() => {
+                // Every cancellation recorded so far takes effect before this command.
+                apply_bulk_purges(
+                    inbox.take_purges(),
+                    &mut flows,
+                    &mut active,
+                    &mut retired,
+                    &mut retiring_incarnations,
+                    &mut cleanups,
+                )?;
                 cleanups.push(apply_bulk_output_command(
                     command,
                     &mut generation,
@@ -1299,7 +1309,15 @@ async fn bulk_writer_task(
             }
             else => break,
         }
-        while let Ok(command) = command_rx.try_recv() {
+        apply_bulk_purges(
+            inbox.take_purges(),
+            &mut flows,
+            &mut active,
+            &mut retired,
+            &mut retiring_incarnations,
+            &mut cleanups,
+        )?;
+        while let Ok(command) = inbox.commands.try_recv() {
             cleanups.push(apply_bulk_output_command(
                 command,
                 &mut generation,
@@ -1402,7 +1420,15 @@ async fn bulk_writer_task(
                     // Lifecycle commands cut only between complete wire records. In particular,
                     // never wait for the rest of this flow's burst before acknowledging Park.
                     let mut cleanups = Vec::new();
-                    while let Ok(command) = command_rx.try_recv() {
+                    apply_bulk_purges(
+                        inbox.take_purges(),
+                        &mut flows,
+                        &mut active,
+                        &mut retired,
+                        &mut retiring_incarnations,
+                        &mut cleanups,
+                    )?;
+                    while let Ok(command) = inbox.commands.try_recv() {
                         cleanups.push(apply_bulk_output_command(
                             command,
                             &mut generation,
@@ -1441,7 +1467,15 @@ async fn bulk_writer_task(
             }
 
             let mut cleanups = Vec::new();
-            while let Ok(command) = command_rx.try_recv() {
+            apply_bulk_purges(
+                inbox.take_purges(),
+                &mut flows,
+                &mut active,
+                &mut retired,
+                &mut retiring_incarnations,
+                &mut cleanups,
+            )?;
+            while let Ok(command) = inbox.commands.try_recv() {
                 cleanups.push(apply_bulk_output_command(
                     command,
                     &mut generation,
@@ -1522,30 +1556,42 @@ fn apply_bulk_output_command(
             retiring_incarnations.clear();
             Ok(BulkOutputCleanup::Flow(completion))
         }
-        BulkOutputCommand::DropFlow {
-            incarnation,
-            id,
-            completion,
-        } => {
-            let key = (incarnation, id);
-            flows.remove(&key);
-            active.retain(|active_key| *active_key != key);
+    }
+}
+
+/// Release queued records of cancelled operations and disconnected clients, and tombstone them
+/// against records that their producers sent before stopping.
+fn apply_bulk_purges(
+    purges: BulkPurges,
+    flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
+    active: &mut VecDeque<(ClientIncarnation, u32)>,
+    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
+    retiring_incarnations: &mut HashSet<ClientIncarnation>,
+    cleanups: &mut Vec<BulkOutputCleanup>,
+) -> AgentdResult<()> {
+    let BulkPurges {
+        flows: cancelled,
+        incarnations,
+    } = purges;
+
+    if !cancelled.is_empty() {
+        flows.retain(|key, _| !cancelled.contains(key));
+        active.retain(|key| !cancelled.contains(key));
+        for (incarnation, id) in cancelled {
             retire_bulk_output(retired, incarnation, id)?;
-            Ok(BulkOutputCleanup::Flow(completion))
-        }
-        BulkOutputCommand::DropIncarnation {
-            incarnation,
-            completion,
-        } => {
-            flows.retain(|(owner, _), _| *owner != incarnation);
-            active.retain(|(owner, _)| *owner != incarnation);
-            retiring_incarnations.insert(incarnation);
-            Ok(BulkOutputCleanup::Incarnation {
-                incarnation,
-                completion,
-            })
         }
     }
+
+    for (incarnation, completion) in incarnations {
+        flows.retain(|(owner, _), _| *owner != incarnation);
+        active.retain(|(owner, _)| *owner != incarnation);
+        retiring_incarnations.insert(incarnation);
+        cleanups.push(BulkOutputCleanup::Incarnation {
+            incarnation,
+            completion,
+        });
+    }
+    Ok(())
 }
 
 /// Complete lifecycle cuts only after the data receiver has been drained through its tombstones.
@@ -2200,9 +2246,10 @@ fn cancel_bulk_correlation(
     session_tx: &SessionOutputSender,
 ) {
     let owner_tx = session_tx.with_incarnation(client_incarnation_for_id(state, id));
-    // Stop every producer before publishing the scheduler cut. Any send that completed before
-    // teardown is already bounded in the scheduler input queue; an in-progress send is cancelled
-    // with its producer task and cannot appear after the cleanup acknowledgement.
+    // Stop every producer before recording the scheduler cut. Any send that completed before
+    // teardown is already bounded in the scheduler input queue, and an in-progress send is
+    // cancelled with its producer task. The cut's tombstone discards whatever reaches the
+    // scheduler after the cut is applied.
     match kind {
         BulkKind::Filesystem => {
             state.write_sessions.remove(&id);
@@ -4650,8 +4697,8 @@ mod tests {
             )
             .unwrap();
             // Leave the dedicated scheduler's input queued: primary completion is allowed to
-            // overtake these bytes, but no late credit may send DropFlow to discard their tail.
-            let (mut sender, mut control, mut bulk, mut scheduler_commands) =
+            // overtake these bytes, but no late credit may purge them and discard their tail.
+            let (mut sender, mut control, mut bulk, scheduler_inbox) =
                 SessionOutputSender::split_channel();
             let producer = sender.with_incarnation(Some(incarnation));
             let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -4788,11 +4835,9 @@ mod tests {
                     out.is_empty(),
                     "late credit must not emit cancellation or another terminal"
                 );
+                let purges = scheduler_inbox.take_purges();
                 assert!(
-                    matches!(
-                        scheduler_commands.try_recv(),
-                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-                    ),
+                    purges.flows.is_empty() && purges.incarnations.is_empty(),
                     "late credit must not purge raw output"
                 );
                 assert!(!bulk.is_empty());
@@ -4930,6 +4975,321 @@ mod tests {
         );
         writer.abort();
         let _ = writer.await;
+    }
+
+    #[tokio::test]
+    async fn cancel_recorded_before_park_is_applied_first() {
+        use std::os::fd::OwnedFd;
+        use tokio::io::AsyncReadExt;
+
+        let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let send_buffer: libc::c_int = 4096;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    writer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&send_buffer as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&send_buffer) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let file = File::from(OwnedFd::from(writer));
+        let mut reader = tokio::net::UnixStream::from_std(reader).unwrap();
+        let (sender, _control, bulk, inbox) = SessionOutputSender::split_channel();
+        let (activity, _activities) = tokio::sync::mpsc::channel(8);
+        let writer = tokio::spawn(bulk_writer_task(file, bulk, inbox, activity));
+        let sender = sender.with_incarnation(Some([0x63; CLIENT_INCARNATION_SIZE]));
+        let record = |id: u32, offset: u64, payload: Bytes| BulkRecord {
+            id,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::GuestToHost,
+            offset,
+            payload,
+        };
+        let first = record(1, 0, Bytes::from(vec![0x6a; 1024 * 1024]));
+        let first_len = bulk_wire_bytes(&first, true);
+        let kept = record(1, first.payload.len() as u64, Bytes::from_static(b"kept"));
+        let kept_len = bulk_wire_bytes(&kept, true);
+        // As large as the first record, so fair scheduling cannot write it ahead of that one.
+        let cancelled = record(2, 0, Bytes::from(vec![0x6b; 1024 * 1024]));
+        for record in [first, kept, cancelled] {
+            assert!(
+                sender
+                    .send(
+                        record.id,
+                        SessionOutput::Bulk(crate::session::BulkSessionOutput::new(
+                            record,
+                            RawActivity::default()
+                        ))
+                    )
+                    .await
+            );
+        }
+        let mut bytes = vec![0; first_len];
+        time::timeout(Duration::from_secs(5), reader.read_exact(&mut bytes[..37]))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The scheduler is inside the first record's write; the cancel and the park both reach it
+        // at the same cut.
+        sender.drop_bulk_flow(2).unwrap();
+        let park_sender = sender.clone();
+        let mut park = tokio::spawn(async move { park_sender.park_bulk_output().await });
+        assert!(
+            time::timeout(Duration::from_millis(20), &mut park)
+                .await
+                .is_err(),
+            "park cut a partial record"
+        );
+        time::timeout(Duration::from_secs(5), reader.read_exact(&mut bytes[37..]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            time::timeout(Duration::from_secs(5), park)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            first_len as u64
+        );
+        assert!(
+            time::timeout(Duration::from_millis(20), reader.read(&mut [0; 1]))
+                .await
+                .is_err(),
+            "a parked scheduler wrote output"
+        );
+
+        // Only the uncancelled flow's retained record follows the resume.
+        sender.resume_bulk_output().await.unwrap();
+        let mut tail = vec![0; kept_len];
+        time::timeout(Duration::from_secs(5), reader.read_exact(&mut tail))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut decoded = BytesMut::from(tail.as_slice());
+        let frame = try_decode_incarnated_bulk_from_bytes(&mut decoded)
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.record.id, 1);
+        assert_eq!(frame.record.payload, Bytes::from_static(b"kept"));
+        assert_eq!(
+            sender.park_bulk_output().await.unwrap(),
+            (first_len + kept_len) as u64
+        );
+        assert!(
+            time::timeout(Duration::from_millis(20), reader.read(&mut [0; 1]))
+                .await
+                .is_err(),
+            "the cancelled flow reached the host"
+        );
+        writer.abort();
+        let _ = writer.await;
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_burst_releases_every_bulk_stream_and_keeps_running() {
+        use std::os::fd::OwnedFd;
+        use tokio::io::AsyncReadExt;
+
+        // Many cancellations in one turn, spread over several SDK clients that hold many streams
+        // each and disconnect together.
+        const CLIENTS: u32 = 4;
+        const STREAMS_PER_CLIENT: u32 = 40;
+        const RECORD_BYTES: usize = 64 * 1024;
+
+        time::timeout(Duration::from_secs(20), async {
+            let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+            writer.set_nonblocking(true).unwrap();
+            reader.set_nonblocking(true).unwrap();
+            let send_buffer: libc::c_int = 4096;
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        writer.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        (&send_buffer as *const libc::c_int).cast(),
+                        std::mem::size_of_val(&send_buffer) as libc::socklen_t,
+                    )
+                },
+                0
+            );
+            let file = File::from(OwnedFd::from(writer));
+            let mut reader = tokio::net::UnixStream::from_std(reader).unwrap();
+            let (mut sender, mut control, bulk, commands) = SessionOutputSender::split_channel();
+            let (activity_tx, _activity_rx) = tokio::sync::mpsc::channel(8);
+            let scheduler = tokio::spawn(bulk_writer_task(file, bulk, commands, activity_tx));
+
+            let mut state = AgentState::default();
+            let mut clients = Vec::new();
+            for slot in 0..CLIENTS {
+                let (id_start, id_end_exclusive) = relay_client_id_range(slot).unwrap();
+                let incarnation = [slot as u8 + 1; CLIENT_INCARNATION_SIZE];
+                establish_relay_client(
+                    &mut state,
+                    RelayClientConnected {
+                        id_start,
+                        id_end_exclusive,
+                        incarnation,
+                    },
+                )
+                .unwrap();
+                let owner = sender.with_incarnation(Some(incarnation));
+                for id in id_start..id_start + STREAMS_PER_CLIENT {
+                    let record = BulkRecord {
+                        id,
+                        kind: BulkKind::Filesystem,
+                        flow: BulkFlow::GuestToHost,
+                        offset: 0,
+                        payload: Bytes::from(vec![0x5c; RECORD_BYTES]),
+                    };
+                    assert!(
+                        owner
+                            .send(
+                                id,
+                                SessionOutput::Bulk(crate::session::BulkSessionOutput::new(
+                                    record,
+                                    RawActivity::default(),
+                                )),
+                            )
+                            .await
+                    );
+                }
+                clients.push((id_start, id_end_exclusive, incarnation));
+            }
+
+            // Leave the host side unread: the scheduler stalls inside its first record while every
+            // other stream's output stays queued behind it.
+            let mut written = vec![0; 37];
+            reader.read_exact(&mut written).await.unwrap();
+
+            // One decode turn: every frame is handled before the scheduler can run again.
+            let config = AgentdConfig {
+                exec_limits: None,
+                user: None,
+                security_profile: Default::default(),
+                default_cwd: None,
+                default_env: Vec::new(),
+            };
+            let mut activity = ActivityTracker::new();
+            let mut workload = crate::workload::tests::fake_latch();
+            let heartbeat = heartbeat::HeartbeatControl::default();
+            let mut out = Vec::new();
+            for (id_start, id_end_exclusive, incarnation) in &clients {
+                for id in *id_start..*id_start + STREAMS_PER_CLIENT {
+                    let cancel = Message::with_payload(
+                        MessageType::BulkCancel,
+                        id,
+                        &BulkCancel {
+                            kind: BulkKind::Filesystem,
+                            reason: BulkCancelReason::CallerCancelled,
+                            message: "client disconnected".into(),
+                        },
+                    )
+                    .unwrap();
+                    handle_message(
+                        cancel,
+                        &mut state,
+                        &mut activity,
+                        &mut sender,
+                        &mut out,
+                        &config,
+                        &mut workload,
+                        &heartbeat,
+                    )
+                    .await
+                    .expect("bulk cancellation must not stop the agent");
+                }
+                let disconnected = Message::with_payload(
+                    MessageType::RelayClientDisconnected,
+                    0,
+                    &RelayClientDisconnected {
+                        id_start: *id_start,
+                        id_end_exclusive: *id_end_exclusive,
+                        incarnation: Some(*incarnation),
+                    },
+                )
+                .unwrap();
+                handle_message(
+                    disconnected,
+                    &mut state,
+                    &mut activity,
+                    &mut sender,
+                    &mut out,
+                    &config,
+                    &mut workload,
+                    &heartbeat,
+                )
+                .await
+                .expect("client disconnect must not stop the agent");
+            }
+
+            let mut terminals = HashSet::new();
+            while let Some(message) = codec::try_decode_from_buf(&mut out).unwrap() {
+                assert_eq!(message.t, MessageType::FsResponse);
+                assert!(!message.payload::<FsResponse>().unwrap().ok);
+                assert!(terminals.insert(message.id));
+            }
+            assert_eq!(terminals.len(), (CLIENTS * STREAMS_PER_CLIENT) as usize);
+
+            let drain = tokio::spawn(async move {
+                reader.read_to_end(&mut written).await.unwrap();
+                written
+            });
+            let mut acks = HashSet::new();
+            for _ in &clients {
+                let envelope = control.recv().await.unwrap();
+                let SessionOutput::Raw(output) = envelope.output else {
+                    panic!("expected a disconnect acknowledgement");
+                };
+                acks.insert(output.frame);
+            }
+            let expected_acks = clients
+                .iter()
+                .map(|(id_start, id_end_exclusive, incarnation)| {
+                    encode_relay_client_disconnected_ack(RelayClientDisconnectedAck {
+                        id_start: *id_start,
+                        id_end_exclusive: *id_end_exclusive,
+                        incarnation: *incarnation,
+                    })
+                    .to_vec()
+                })
+                .collect::<HashSet<_>>();
+            assert_eq!(acks, expected_acks);
+
+            // Every queued record has released its share of the output budget.
+            let released = time::timeout(
+                Duration::from_secs(5),
+                sender.reserve_bulk(crate::session::SESSION_OUTPUT_BYTE_CAPACITY),
+            )
+            .await
+            .expect("cancelled streams kept output budget")
+            .unwrap();
+            drop(released);
+            drop(sender);
+            scheduler
+                .await
+                .unwrap()
+                .expect("the scheduler must survive the burst");
+
+            // Only the record already on the wire when the burst began reaches the host.
+            let mut written = BytesMut::from(drain.await.unwrap().as_slice());
+            let mut delivered = Vec::new();
+            while let Some(frame) = try_decode_incarnated_bulk_from_bytes(&mut written).unwrap() {
+                delivered.push(frame.record.id);
+            }
+            assert!(written.is_empty());
+            assert_eq!(delivered, vec![clients[0].0]);
+        })
+        .await
+        .expect("client disconnect burst did not complete");
     }
 
     #[test]
@@ -5531,8 +5891,7 @@ mod tests {
     #[tokio::test]
     async fn bulk_output_tombstone_discards_late_producer_record() {
         let incarnation = [0x5a; CLIENT_INCARNATION_SIZE];
-        let (session_tx, _control_rx, mut bulk_rx, _command_rx) =
-            SessionOutputSender::split_channel();
+        let (session_tx, _control_rx, mut bulk_rx, inbox) = SessionOutputSender::split_channel();
         let owner_tx = session_tx.with_incarnation(Some(incarnation));
         let record = || BulkRecord {
             id: 17,
@@ -5553,7 +5912,6 @@ mod tests {
                 .await
         );
 
-        let mut generation = 0;
         let mut flows = HashMap::new();
         let mut active = VecDeque::new();
         let mut retired = HashMap::new();
@@ -5567,27 +5925,18 @@ mod tests {
             &retiring_incarnations,
         )
         .unwrap();
-        let (completion, mut completed) = tokio::sync::oneshot::channel();
-        let cleanup = apply_bulk_output_command(
-            BulkOutputCommand::DropFlow {
-                incarnation,
-                id: 17,
-                completion,
-            },
-            &mut generation,
+        owner_tx.drop_bulk_flow(17).unwrap();
+        let mut cleanups = Vec::new();
+        apply_bulk_purges(
+            inbox.take_purges(),
             &mut flows,
             &mut active,
             &mut retired,
             &mut retiring_incarnations,
-            &mut BulkOutputPosition::default(),
+            &mut cleanups,
         )
         .unwrap();
-        assert!(matches!(
-            completed.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ));
-        complete_bulk_output_cleanups(vec![cleanup], &mut retired, &mut retiring_incarnations);
-        assert_eq!(completed.try_recv(), Ok(()));
+        assert!(cleanups.is_empty());
 
         assert!(
             owner_tx
@@ -6458,7 +6807,7 @@ mod tests {
             sender.restore_generation().await.unwrap();
             sender
         });
-        let command = commands.recv().await.unwrap();
+        let command = commands.commands.recv().await.unwrap();
         let mut generation = 0;
         let mut flows = HashMap::new();
         let mut active = VecDeque::new();
