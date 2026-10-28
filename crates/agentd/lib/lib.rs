@@ -34,3 +34,4 @@ pub mod tls;
 
 pub use config::{AgentdConfig, BootParams, HandoffInit, SecurityProfile};
 pub use error::*;
+pub use rlimit::raise_own_open_file_limit;

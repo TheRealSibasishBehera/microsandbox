@@ -1077,7 +1077,7 @@ impl ExecSession {
             .transpose()?;
 
         // Pre-parse rlimits before fork (no allocations in child).
-        let parsed_rlimits = rlimit::to_libc(&req.rlimits);
+        let child_limits = rlimit::exec_child_limits(&req.rlimits);
 
         // Prevent the central reaper from observing this child before its PID
         // and generation are registered.
@@ -1157,8 +1157,13 @@ impl ExecSession {
                 unsafe { libc::_exit(1) };
             }
 
+            // Best effort: if this fails, the command keeps agentd's own open-file limit.
+            if let Some(limit) = &child_limits.startup_open_files {
+                unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, limit) };
+            }
+
             // Apply limits while privileged so non-root commands can raise hard limits.
-            for (resource, limit) in &parsed_rlimits {
+            for (resource, limit) in &child_limits.requested {
                 if unsafe { libc::setrlimit(*resource as _, limit) } != 0 {
                     unsafe { libc::_exit(1) };
                 }
@@ -1287,7 +1292,7 @@ impl ExecSession {
         }
 
         // Apply the security profile and resource limits in the child before exec.
-        let parsed_rlimits = rlimit::to_libc(&req.rlimits);
+        let child_limits = rlimit::exec_child_limits(&req.rlimits);
         unsafe {
             cmd.pre_exec(move || {
                 // This uses only write(2) in the child and therefore remains
@@ -1309,8 +1314,13 @@ impl ExecSession {
                     apply_resolved_groups(user).map_err(agentd_to_io_error)?;
                 }
 
+                // Best effort: if this fails, the command keeps agentd's own open-file limit.
+                if let Some(limit) = &child_limits.startup_open_files {
+                    libc::setrlimit(libc::RLIMIT_NOFILE, limit);
+                }
+
                 // Apply limits before dropping the privilege needed to raise hard limits.
-                for (resource, limit) in &parsed_rlimits {
+                for (resource, limit) in &child_limits.requested {
                     if libc::setrlimit(*resource as _, limit) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -2076,6 +2086,11 @@ mod tests {
 
     use super::*;
 
+    const OPEN_FILE_HELPER_ENV: &str = "MSB_AGENTD_OPEN_FILE_LIMIT_HELPER";
+    const OPEN_FILE_HELPER_SENTINEL: &str = "open-file-limit-helper-passed";
+    const OPEN_FILE_TEST_NAME: &str =
+        "session::tests::exec_children_keep_the_inherited_open_file_limit";
+    const NR_OPEN_TEST_NAME: &str = "session::tests::exec_children_start_under_a_lowered_nr_open";
     const REAP_HELPER_ENV: &str = "MSB_AGENTD_SESSION_REAP_HELPER";
     const REAP_HELPER_SENTINEL: &str = "session-reap-helper-passed";
     const REAP_TEST_NAME: &str = "session::tests::test_spawn_reaps_adopted_descendant";
@@ -2793,6 +2808,186 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // Raising agentd's hard open-file limit needs CAP_SYS_RESOURCE.
+    // For Docker: --cap-add SYS_RESOURCE.
+    #[test]
+    #[ignore = "requires root with CAP_SYS_RESOURCE"]
+    fn exec_children_keep_the_inherited_open_file_limit() {
+        if std::env::var_os(OPEN_FILE_HELPER_ENV).is_some() {
+            run_open_file_scenario(open_file_limit_scenario());
+            return;
+        }
+        run_open_file_helper(OPEN_FILE_TEST_NAME);
+    }
+
+    // Lowers the system-wide fs.nr_open for its duration, so it is not part of any CI filter.
+    #[test]
+    #[ignore = "requires root and lowers the system-wide fs.nr_open; run alone"]
+    fn exec_children_start_under_a_lowered_nr_open() {
+        if std::env::var_os(OPEN_FILE_HELPER_ENV).is_some() {
+            run_open_file_scenario(lowered_nr_open_scenario());
+            return;
+        }
+        run_open_file_helper(NR_OPEN_TEST_NAME);
+    }
+
+    /// Runs one open-file scenario in a fresh test process: it changes this process's open-file
+    /// limit and records agentd's startup one.
+    fn run_open_file_helper(test_name: &str) {
+        let mut helper = StdCommand::new(std::env::current_exe().expect("current test binary"))
+            .args(["--exact", test_name, "--ignored", "--nocapture"])
+            .env(OPEN_FILE_HELPER_ENV, "1")
+            .stdout(StdStdio::piped())
+            .spawn()
+            .expect("spawn isolated open-file limit test");
+        let mut output = String::new();
+        helper
+            .stdout
+            .take()
+            .expect("helper stdout")
+            .read_to_string(&mut output)
+            .expect("read helper stdout");
+
+        match helper.wait() {
+            Ok(status) => assert!(status.success(), "helper failed: {status}\n{output}"),
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {}
+            Err(error) => panic!("wait for helper: {error}"),
+        }
+        assert!(
+            output.contains(OPEN_FILE_HELPER_SENTINEL),
+            "helper did not complete the open-file limit scenario:\n{output}"
+        );
+    }
+
+    fn run_open_file_scenario(scenario: impl std::future::Future<Output = ()>) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("open-file limit test runtime");
+        runtime.block_on(scenario);
+        println!("{OPEN_FILE_HELPER_SENTINEL}");
+    }
+
+    /// Start where the kernel starts PID 1 (soft 1024, hard 4096), then raise agentd's limit.
+    fn raise_from_kernel_default() {
+        let startup = libc::rlimit {
+            rlim_cur: 1024,
+            rlim_max: 4096,
+        };
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &startup) }, 0);
+        rlimit::raise_own_open_file_limit().unwrap();
+    }
+
+    fn read_nr_open() -> u64 {
+        std::fs::read_to_string("/proc/sys/fs/nr_open")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    fn own_open_file_limit() -> (u64, u64) {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        (limit.rlim_cur, limit.rlim_max)
+    }
+
+    /// Returns a command's soft and hard open-file limits as `"soft hard"`.
+    async fn child_open_file_limit(
+        tty: bool,
+        rlimits: Vec<microsandbox_protocol::exec::ExecRlimit>,
+    ) -> String {
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let req = ExecRequest {
+            cmd: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "echo $(ulimit -S -n) $(ulimit -H -n)".to_string(),
+            ],
+            env: vec!["PATH=/usr/local/bin:/usr/bin:/bin".to_string()],
+            cwd: None,
+            user: None,
+            tty,
+            rows: 24,
+            cols: 80,
+            rlimits,
+        };
+        let _session = ExecSession::spawn(11, &req, tx, None, SecurityProfile::Default, None, None)
+            .expect("spawn open-file limit probe");
+        let (code, stdout) = time::timeout(Duration::from_secs(10), async {
+            let mut stdout = Vec::new();
+            while let Some(envelope) = rx.recv().await {
+                match envelope.output {
+                    SessionOutput::Stdout(data) => stdout.extend_from_slice(&data),
+                    SessionOutput::Exited(code) => return (code, stdout),
+                    SessionOutput::Stderr(_) | SessionOutput::Raw(_) | SessionOutput::Bulk(_) => {}
+                }
+            }
+            panic!("session closed without an exit status");
+        })
+        .await
+        .expect("open-file limit probe timed out");
+
+        assert_eq!(code, 0, "tty={tty}");
+        String::from_utf8_lossy(&stdout).trim().to_string()
+    }
+
+    async fn open_file_limit_scenario() {
+        raise_from_kernel_default();
+
+        let expected = rlimit::AGENTD_OPEN_FILE_LIMIT.min(read_nr_open()).max(4096);
+        assert_eq!(own_open_file_limit(), (expected, expected));
+
+        let requested = microsandbox_protocol::exec::ExecRlimit {
+            resource: "nofile".into(),
+            soft: 2048,
+            hard: 8192,
+        };
+        for tty in [false, true] {
+            assert_eq!(child_open_file_limit(tty, Vec::new()).await, "1024 4096");
+            assert_eq!(
+                child_open_file_limit(tty, vec![requested.clone()]).await,
+                "2048 8192"
+            );
+        }
+    }
+
+    async fn lowered_nr_open_scenario() {
+        /// Puts the original fs.nr_open back, even when an assertion fails.
+        struct RestoreNrOpen(u64);
+
+        impl Drop for RestoreNrOpen {
+            fn drop(&mut self) {
+                std::fs::write("/proc/sys/fs/nr_open", self.0.to_string())
+                    .expect("restore fs.nr_open");
+            }
+        }
+
+        raise_from_kernel_default();
+        let _restore = RestoreNrOpen(read_nr_open());
+        // Below the recorded startup hard limit (4096): restoring that exact limit would now fail.
+        std::fs::write("/proc/sys/fs/nr_open", "2048").expect("lower fs.nr_open");
+
+        let requested = microsandbox_protocol::exec::ExecRlimit {
+            resource: "nofile".into(),
+            soft: 100,
+            hard: 200,
+        };
+        for tty in [false, true] {
+            assert_eq!(child_open_file_limit(tty, Vec::new()).await, "1024 2048");
+            assert_eq!(
+                child_open_file_limit(tty, vec![requested.clone()]).await,
+                "100 200"
+            );
         }
     }
 
