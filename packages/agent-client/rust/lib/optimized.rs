@@ -218,6 +218,8 @@ struct StreamOwner {
     /// decoder, alive.
     pending: Weak<Mutex<HashMap<u32, CorrelationRoute>>>,
     writer: mpsc::Sender<WriterCommand>,
+    /// The connection's runtime, so an open dropped outside it is still ended.
+    runtime: tokio::runtime::Handle,
 }
 
 /// How the client ends a TCP session once its caller stops receiving it. Each variant holds the
@@ -252,7 +254,7 @@ struct OpenGuard {
 enum OpenPhase {
     /// The route exists, but the opening frame has not reached the writer queue.
     Reserved,
-    /// The opening frame is queued and will reach the sandbox.
+    /// The opening frame is queued for the writer.
     Committed,
 }
 
@@ -548,9 +550,9 @@ impl AgentClient {
 
     /// Registers a route and writes the opening frame.
     ///
-    /// The client owns the route from before the frame is committed, so a caller that drops this
-    /// future at any point leaves nothing behind: before the commit nothing is sent, and after it
-    /// a TCP session is ended by `tcp`.
+    /// The client owns the route from before the frame is committed. If this future is dropped
+    /// before the commit, nothing is sent and the route is removed. If it is dropped after, `tcp`
+    /// ends a TCP session; any other route is removed when its next frame finds no receiver.
     async fn open_inbound_stream(
         &self,
         flags: u8,
@@ -929,11 +931,12 @@ impl TcpCancelOnDrop {
     /// Sends nothing when a terminal already ended the route, or when the caller cancelled or
     /// forgot it. After a `BulkCancel`, waits for the sandbox's terminal for as long as the
     /// connection lives, warning once when none arrives within [`CANCEL_TERMINAL_WARN_AFTER`].
-    async fn run(self, mut rx: mpsc::Receiver<InboundFrame>) {
+    async fn run(self, rx: mpsc::Receiver<InboundFrame>) {
         let Some(pending) = self.owner.pending.upgrade() else {
             return;
         };
-        {
+        // `awaiting_terminal` keeps the receiver only for a session the sandbox still answers.
+        let (t, body, mut awaiting_terminal) = {
             let mut map = pending.lock().await;
             let Some(route) = map
                 .get_mut(&self.id)
@@ -942,19 +945,26 @@ impl TcpCancelOnDrop {
                 return;
             };
             match self.end {
-                TcpAbandon::Cancel(_) => route.state = CorrelationState::Retired,
-                TcpAbandon::Close(_) => {
+                TcpAbandon::Cancel(body) => {
+                    route.state = CorrelationState::Retired;
+                    (MessageType::BulkCancel, body, Some(rx))
+                }
+                TcpAbandon::Close(body) => {
                     map.remove(&self.id);
+                    drop(rx);
+                    (MessageType::TcpClose, body, None)
                 }
             }
-        }
+        };
         // No strong reference may outlive the client during the wait below.
         drop(pending);
 
-        let (t, body) = match self.end {
-            TcpAbandon::Cancel(body) => (MessageType::BulkCancel, body),
-            TcpAbandon::Close(body) => (MessageType::TcpClose, body),
-        };
+        // The connection's reader may be waiting for room in this queue. A retired route admits
+        // no new frames, so one drain frees it before the cancel waits for writer room.
+        if let Some(rx) = awaiting_terminal.as_mut() {
+            while rx.try_recv().is_ok() {}
+        }
+
         let (ack, _) = oneshot::channel();
         let command = WriterCommand {
             frame: WriterFrame::Control(RawFrame {
@@ -965,9 +975,12 @@ impl TcpCancelOnDrop {
             ack,
         };
         // A closed writer means the connection is gone, and the relay ends its sessions with it.
-        if self.owner.writer.send(command).await.is_err() || t == MessageType::TcpClose {
+        if self.owner.writer.send(command).await.is_err() {
             return;
         }
+        let Some(mut rx) = awaiting_terminal else {
+            return;
+        };
 
         // The retired route discards every frame, so the receiver closes only when the terminal
         // removes the route or the connection ends.
@@ -1121,6 +1134,7 @@ where
     let owner = StreamOwner {
         pending: Arc::downgrade(&pending),
         writer: writer_tx.clone(),
+        runtime: tokio::runtime::Handle::current(),
     };
 
     Ok(AgentClient {
@@ -1625,6 +1639,8 @@ async fn decode_stream_task(
         }
     }
 
+    // The caller sees the stream end now; the cancel may wait on the sandbox.
+    drop(tx);
     if let Some(tcp) = tcp {
         tcp.run(raw_rx).await;
     }
@@ -1670,6 +1686,8 @@ async fn decode_frame_stream_task(
         }
     }
 
+    // The caller sees the stream end now; the cancel may wait on the sandbox.
+    drop(tx);
     if let Some(tcp) = tcp {
         tcp.run(raw_rx).await;
     }
@@ -1745,16 +1763,12 @@ impl Drop for OpenGuard {
         let Some(rx) = self.rx.take() else {
             return;
         };
-        // Without a runtime the connection's own tasks are gone too.
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
 
         match self.phase {
             OpenPhase::Reserved => {
                 let pending = self.owner.pending.clone();
                 let id = self.id;
-                runtime.spawn(async move {
+                self.owner.runtime.spawn(async move {
                     if let Some(pending) = pending.upgrade() {
                         pending.lock().await.remove(&id);
                     }
@@ -1769,7 +1783,7 @@ impl Drop for OpenGuard {
                     id: self.id,
                     end,
                 };
-                runtime.spawn(tcp.run(rx));
+                self.owner.runtime.spawn(tcp.run(rx));
             }
         }
     }
@@ -2566,22 +2580,46 @@ mod tests {
 
     /// Connects to an in-test relay whose `core.ready` advertises `generation`.
     #[cfg(feature = "stream")]
-    async fn connect_test_relay(generation: u8) -> (AgentClient, tokio::io::DuplexStream) {
+    async fn connect_test_relay(generation: u8) -> (AgentClient, TestRelay) {
+        connect_test_relay_with_outbound(generation, 1024 * 1024).await
+    }
+
+    /// The in-test relay's end of the connection.
+    #[cfg(feature = "stream")]
+    type TestRelay = tokio::io::Join<
+        tokio::io::ReadHalf<tokio::io::SimplexStream>,
+        tokio::io::WriteHalf<tokio::io::SimplexStream>,
+    >;
+
+    /// Connects to an in-test relay that buffers at most `outbound` unread bytes from the client,
+    /// so the test decides when the client's writer can make progress.
+    #[cfg(feature = "stream")]
+    async fn connect_test_relay_with_outbound(
+        generation: u8,
+        outbound: usize,
+    ) -> (AgentClient, TestRelay) {
         use tokio::io::AsyncWriteExt;
 
-        let (client_io, mut relay) = tokio::io::duplex(1024 * 1024);
+        let (relay_reader, client_writer) = tokio::io::simplex(outbound);
+        let (client_reader, mut relay_writer) = tokio::io::simplex(1024 * 1024);
         let mut ready = Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
         ready.v = generation;
-        relay.write_all(&1u32.to_be_bytes()).await.unwrap();
-        relay.write_all(&1024u32.to_be_bytes()).await.unwrap();
-        codec::write_message(&mut relay, &ready).await.unwrap();
+        relay_writer.write_all(&1u32.to_be_bytes()).await.unwrap();
+        relay_writer
+            .write_all(&1024u32.to_be_bytes())
+            .await
+            .unwrap();
+        codec::write_message(&mut relay_writer, &ready)
+            .await
+            .unwrap();
 
+        let client_io = tokio::io::join(client_reader, client_writer);
         let client = AgentClient::connect_stream(client_io).await.unwrap();
-        (client, relay)
+        (client, tokio::io::join(relay_reader, relay_writer))
     }
 
     #[cfg(feature = "stream")]
-    async fn next_client_message(relay: &mut tokio::io::DuplexStream) -> Message {
+    async fn next_client_message(relay: &mut TestRelay) -> Message {
         let frame = tokio::time::timeout(Duration::from_secs(1), codec::read_raw_frame(relay))
             .await
             .expect("client sent no frame")
@@ -2590,19 +2628,14 @@ mod tests {
     }
 
     #[cfg(feature = "stream")]
-    async fn assert_no_client_frame(relay: &mut tokio::io::DuplexStream) {
+    async fn assert_no_client_frame(relay: &mut TestRelay) {
         let read =
             tokio::time::timeout(Duration::from_millis(200), codec::read_raw_frame(relay)).await;
         assert!(read.is_err(), "client sent an unexpected frame: {read:?}");
     }
 
     #[cfg(feature = "stream")]
-    async fn send_guest<T: Serialize>(
-        relay: &mut tokio::io::DuplexStream,
-        t: MessageType,
-        id: u32,
-        payload: &T,
-    ) {
+    async fn send_guest<T: Serialize>(relay: &mut TestRelay, t: MessageType, id: u32, payload: &T) {
         let message = Message::with_payload(t, id, payload).unwrap();
         codec::write_message(relay, &message).await.unwrap();
     }
@@ -2631,7 +2664,7 @@ mod tests {
     #[cfg(feature = "stream")]
     async fn open_connected_bulk_tcp(
         client: &AgentClient,
-        relay: &mut tokio::io::DuplexStream,
+        relay: &mut TestRelay,
     ) -> (u32, mpsc::Receiver<AgentFrame>) {
         use microsandbox_protocol::bulk::{
             BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkAccepted,
@@ -2717,28 +2750,31 @@ mod tests {
 
     #[cfg(feature = "stream")]
     #[tokio::test]
-    async fn dropped_receiver_on_inline_session_closes_it() {
+    async fn dropped_receiver_without_bulk_offer_closes_the_session() {
         use microsandbox_protocol::tcp::TcpConnected;
 
-        // Generation 7 predates raw bulk: the session takes no relay slot and owes no terminal.
-        let (client, mut relay) = connect_test_relay(7).await;
-        let (id, mut frames) = client
-            .stream_frames(MessageType::TcpConnect, &tcp_connect(false))
-            .await
-            .unwrap();
-        assert_eq!(
-            next_client_message(&mut relay).await.t,
-            MessageType::TcpConnect
-        );
-        send_guest(&mut relay, MessageType::TcpConnected, id, &TcpConnected {}).await;
-        assert!(frames.recv().await.is_some());
+        // Generation 7 predates raw bulk; at the current generation the open makes no offer.
+        // Either way the session holds no stream slot and owes no terminal.
+        for generation in [7, PROTOCOL_VERSION] {
+            let (client, mut relay) = connect_test_relay(generation).await;
+            let (id, mut frames) = client
+                .stream_frames(MessageType::TcpConnect, &tcp_connect(false))
+                .await
+                .unwrap();
+            assert_eq!(
+                next_client_message(&mut relay).await.t,
+                MessageType::TcpConnect
+            );
+            send_guest(&mut relay, MessageType::TcpConnected, id, &TcpConnected {}).await;
+            assert!(frames.recv().await.is_some());
 
-        drop(frames);
+            drop(frames);
 
-        let close = next_client_message(&mut relay).await;
-        assert_eq!(close.t, MessageType::TcpClose);
-        assert_eq!(close.id, id);
-        assert!(!client.pending.lock().await.contains_key(&id));
+            let close = next_client_message(&mut relay).await;
+            assert_eq!(close.t, MessageType::TcpClose, "generation {generation}");
+            assert_eq!(close.id, id);
+            assert!(!client.pending.lock().await.contains_key(&id));
+        }
     }
 
     #[cfg(feature = "stream")]
@@ -2795,23 +2831,35 @@ mod tests {
     #[cfg(feature = "stream")]
     #[tokio::test]
     async fn dropped_open_before_commit_sends_nothing() {
+        assert_uncommitted_open_drop_is_local(MessageType::TcpConnect, &tcp_connect(true)).await;
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn dropped_exec_open_before_commit_sends_nothing() {
+        assert_uncommitted_open_drop_is_local(MessageType::ExecRequest, &exec_request()).await;
+    }
+
+    /// Drops an open of `t` while it waits for writer room, then checks that nothing reached the
+    /// relay, the route is gone and the next open still works.
+    #[cfg(feature = "stream")]
+    async fn assert_uncommitted_open_drop_is_local<T: Serialize>(t: MessageType, payload: &T) {
         use std::future::Future;
         use std::task::Poll;
 
         let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
-        let request = tcp_connect(true);
 
         // The writer task has not run yet, so these opens fill its queue and the last one waits
         // for room before its frame is committed.
         let mut queued = Vec::new();
         for _ in 0..WRITER_QUEUE_CAPACITY {
-            let mut open = Box::pin(client.stream_frames(MessageType::TcpConnect, &request));
+            let mut open = Box::pin(client.stream_frames(t, payload));
             let pending =
                 std::future::poll_fn(|cx| Poll::Ready(open.as_mut().poll(cx).is_pending())).await;
             assert!(pending);
             queued.push(open);
         }
-        let mut uncommitted = Box::pin(client.stream_frames(MessageType::TcpConnect, &request));
+        let mut uncommitted = Box::pin(client.stream_frames(t, payload));
         let pending =
             std::future::poll_fn(|cx| Poll::Ready(uncommitted.as_mut().poll(cx).is_pending()))
                 .await;
@@ -2821,10 +2869,7 @@ mod tests {
         drop(uncommitted);
 
         for _ in 0..WRITER_QUEUE_CAPACITY {
-            assert_eq!(
-                next_client_message(&mut relay).await.t,
-                MessageType::TcpConnect
-            );
+            assert_eq!(next_client_message(&mut relay).await.t, t);
         }
         assert_no_client_frame(&mut relay).await;
         assert!(!client.pending.lock().await.contains_key(&uncommitted_id));
@@ -2834,11 +2879,26 @@ mod tests {
         drop(queued);
     }
 
+    #[cfg(feature = "stream")]
+    fn exec_request() -> microsandbox_protocol::exec::ExecRequest {
+        microsandbox_protocol::exec::ExecRequest {
+            cmd: "/bin/true".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        }
+    }
+
     /// Opens one more bulk TCP session while the relay reads its opening frame.
     #[cfg(feature = "stream")]
     async fn open_next_bulk_tcp(
         client: &AgentClient,
-        relay: &mut tokio::io::DuplexStream,
+        relay: &mut TestRelay,
     ) -> (u32, mpsc::Receiver<AgentFrame>) {
         let request = tcp_connect(true);
         let (opened, opening) = tokio::join!(
@@ -2854,22 +2914,11 @@ mod tests {
     #[cfg(feature = "stream")]
     #[tokio::test]
     async fn exec_stream_receiver_drop_is_unchanged() {
-        use microsandbox_protocol::exec::{ExecRequest, ExecStdout};
+        use microsandbox_protocol::exec::ExecStdout;
 
         let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
-        let request = ExecRequest {
-            cmd: "/bin/true".into(),
-            args: Vec::new(),
-            env: Vec::new(),
-            cwd: None,
-            user: None,
-            tty: false,
-            rows: 24,
-            cols: 80,
-            rlimits: Vec::new(),
-        };
         let (id, rx) = client
-            .stream(MessageType::ExecRequest, &request)
+            .stream(MessageType::ExecRequest, &exec_request())
             .await
             .unwrap();
         assert_eq!(
@@ -2915,6 +2964,7 @@ mod tests {
         };
         send_guest(&mut relay, MessageType::TcpFailed, id, &failed).await;
         send_guest(&mut relay, MessageType::TcpFailed, id, &failed).await;
+        assert_no_client_frame(&mut relay).await;
 
         // Past the warning delay: the answered cancel left the connection in service.
         tokio::time::sleep(CANCEL_TERMINAL_WARN_AFTER * 2).await;
@@ -2992,5 +3042,98 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(!client.pending.lock().await.contains_key(&id));
         assert_eq!(warnings.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn malformed_frame_cancels_the_session() {
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let (id, mut frames) = open_connected_bulk_tcp(&client, &mut relay).await;
+
+        let malformed = RawFrame {
+            id,
+            flags: 0,
+            body: vec![0xff],
+        };
+        codec::write_raw_frame(&mut relay, &malformed)
+            .await
+            .unwrap();
+
+        assert!(frames.recv().await.is_none());
+        assert_caller_cancelled(&next_client_message(&mut relay).await, id);
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn open_dropped_outside_a_runtime_still_cancels_the_session() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let request = tcp_connect(true);
+        let mut open = Box::pin(client.stream_frames(MessageType::TcpConnect, &request));
+        let pending =
+            std::future::poll_fn(|cx| Poll::Ready(open.as_mut().poll(cx).is_pending())).await;
+        assert!(pending);
+
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(open));
+        });
+
+        let opening = next_client_message(&mut relay).await;
+        assert_eq!(opening.t, MessageType::TcpConnect);
+        assert_caller_cancelled(&next_client_message(&mut relay).await, opening.id);
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn dropped_receiver_releases_the_reader_while_the_writer_is_full() {
+        use microsandbox_protocol::tcp::TcpData;
+        use std::future::Future;
+        use std::task::Poll;
+
+        let (client, mut relay) = connect_test_relay_with_outbound(PROTOCOL_VERSION, 512).await;
+        let (stalled_id, stalled) = open_connected_bulk_tcp(&client, &mut relay).await;
+        let (other_id, mut other) = open_next_bulk_tcp(&client, &mut relay).await;
+
+        // The relay stops reading: one large frame blocks the writer, and more fill its queue.
+        let large = TcpData {
+            data: vec![0; 64 * 1024],
+        };
+        let small = TcpData { data: vec![0; 8] };
+        let mut writes = vec![Box::pin(client.send(
+            other_id,
+            MessageType::TcpData,
+            &large,
+        ))];
+        writes.extend(
+            (0..WRITER_QUEUE_CAPACITY)
+                .map(|_| Box::pin(client.send(other_id, MessageType::TcpData, &small))),
+        );
+        for write in &mut writes {
+            let pending =
+                std::future::poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx).is_pending())).await;
+            assert!(pending);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // The first stream's caller reads nothing, so its queues fill and the reader parks on it
+        // with the other stream's frame still unread behind.
+        for _ in 0..8 {
+            send_guest(&mut relay, MessageType::TcpData, stalled_id, &small).await;
+        }
+        send_guest(&mut relay, MessageType::TcpData, other_id, &small).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(other.try_recv().is_err());
+
+        drop(stalled);
+
+        let delivered = tokio::time::timeout(Duration::from_secs(1), other.recv())
+            .await
+            .expect("the reader stayed blocked on the dropped stream");
+        assert!(
+            matches!(delivered, Some(AgentFrame::Control(message)) if message.t == MessageType::TcpData)
+        );
+        drop(writes);
     }
 }

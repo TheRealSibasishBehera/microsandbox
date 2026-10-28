@@ -417,7 +417,7 @@ while let Some(msg) = rx.recv().await {
 
 </Accordion>
 
-Open a typed streaming session. The returned id is the protocol correlation id. Use it with [`send()`](#client-send) for follow-up messages such as stdin, resize, signal, or file data chunks. The receiver yields messages until a terminal frame is delivered or the connection closes.
+Open a typed streaming session. The returned id is the protocol correlation id. Use it with [`send()`](#client-send) for follow-up messages such as stdin, resize, signal, or file data chunks. The receiver yields messages until a terminal frame is delivered or the connection closes. For a `TcpConnect` session, dropping the receiver before the session ends, or dropping this call after its request was sent, closes the guest connection.
 
 <p className="msb-label">Parameters</p>
 
