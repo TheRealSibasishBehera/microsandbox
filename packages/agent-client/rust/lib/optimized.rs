@@ -27,8 +27,7 @@ use std::future::Future;
 use std::path::Path;
 #[cfg(feature = "stream")]
 use std::pin::Pin;
-use std::sync::{Arc, atomic::AtomicU32};
-#[cfg(feature = "stream")]
+use std::sync::{Arc, Weak, atomic::AtomicU32};
 use std::time::Duration;
 
 #[cfg(feature = "stream")]
@@ -37,14 +36,16 @@ use microsandbox_protocol::message::FLAG_BULK;
 #[cfg(feature = "stream")]
 use microsandbox_protocol::message::FLAG_TERMINAL;
 use microsandbox_protocol::{
+    ProtocolError,
     bulk::{
-        BULK_PROTOCOL_VERSION, BulkCancel, BulkCredit, BulkFlow, BulkKind, BulkRecord,
-        MAX_BULK_RECORD_PAYLOAD,
+        BULK_PROTOCOL_VERSION, BulkCancel, BulkCancelReason, BulkCredit, BulkFlow, BulkKind,
+        BulkRecord, MAX_BULK_RECORD_PAYLOAD,
     },
     codec::{self, RawFrame},
     core::Ready,
     exec::MAX_EXEC_CONTROL_BYTES,
     message::{FRAME_HEADER_SIZE, Message, MessageType, PROTOCOL_VERSION},
+    tcp::{TcpClose, TcpConnect},
 };
 use serde::Serialize;
 #[cfg(feature = "stream")]
@@ -86,6 +87,10 @@ const WRITER_QUEUE_CAPACITY: usize = 8;
 const REQUEST_QUEUE_CAPACITY: usize = 1;
 /// Two maximum-sized frames keep each correlation stream at or below 8 MiB.
 const STREAM_QUEUE_CAPACITY: usize = 2;
+
+/// How long a TCP session cancelled for a departed caller may go without the sandbox's terminal
+/// before the client logs a warning. It keeps waiting afterwards: a paused sandbox answers late.
+const CANCEL_TERMINAL_WARN_AFTER: Duration = Duration::from_secs(30);
 
 const LEGACY_PROTOCOL_VERSION: u8 = 1;
 // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
@@ -145,6 +150,8 @@ pub struct AgentClient {
     negotiated_version: u8,
     /// Pending response channels keyed by correlation ID.
     pending: Arc<Mutex<HashMap<u32, CorrelationRoute>>>,
+    /// What stream openers and decoders use to end a TCP session nobody receives.
+    owner: StreamOwner,
     /// Background reader task handle.
     reader_handle: JoinHandle<()>,
     /// Background writer task handle.
@@ -199,6 +206,54 @@ struct CorrelationRoute {
 enum CorrelationState {
     Active,
     Cancelling,
+    /// Cancelled by the client after its caller stopped receiving. Every frame is discarded, and
+    /// the first terminal ends the route.
+    Retired,
+}
+
+/// Connection handles that stream openers and decoders use to end a TCP session nobody receives.
+#[derive(Clone)]
+struct StreamOwner {
+    /// Weak, so a live stream never keeps a dropped client's routes, and with them its own
+    /// decoder, alive.
+    pending: Weak<Mutex<HashMap<u32, CorrelationRoute>>>,
+    writer: mpsc::Sender<WriterCommand>,
+}
+
+/// How the client ends a TCP session once its caller stops receiving it. Each variant holds the
+/// encoded message body.
+enum TcpAbandon {
+    /// `BulkCancel`: the sandbox answers with a terminal, which releases the session's stream slot.
+    Cancel(Vec<u8>),
+    /// `TcpClose`: the sandbox owes no terminal. Used only for sessions that hold no stream slot.
+    Close(Vec<u8>),
+}
+
+/// A TCP session the client ends when its caller stops receiving it.
+struct TcpCancelOnDrop {
+    owner: StreamOwner,
+    id: u32,
+    end: TcpAbandon,
+}
+
+/// Holds a stream's route while its opening frame is written.
+///
+/// Dropped before the writer accepted the frame, it removes the route and nothing reaches the
+/// sandbox. Dropped after, a TCP session is ended as if its caller had dropped the receiver.
+struct OpenGuard {
+    owner: StreamOwner,
+    id: u32,
+    phase: OpenPhase,
+    /// `None` once handed to the caller.
+    rx: Option<mpsc::Receiver<InboundFrame>>,
+    tcp: Option<TcpAbandon>,
+}
+
+enum OpenPhase {
+    /// The route exists, but the opening frame has not reached the writer queue.
+    Reserved,
+    /// The opening frame is queued and will reach the sandbox.
+    Committed,
 }
 
 #[cfg(feature = "stream")]
@@ -485,26 +540,43 @@ impl AgentClient {
         flags: u8,
         body: Vec<u8>,
     ) -> AgentClientResult<(u32, mpsc::Receiver<RawFrame>)> {
-        let (id, inbound_rx) = self.open_inbound_stream(flags, body).await?;
+        let (id, inbound_rx, _) = self.open_inbound_stream(flags, body, None).await?;
         let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
         tokio::spawn(materialize_raw_stream_task(inbound_rx, tx));
         Ok((id, rx))
     }
 
+    /// Registers a route and writes the opening frame.
+    ///
+    /// The client owns the route from before the frame is committed, so a caller that drops this
+    /// future at any point leaves nothing behind: before the commit nothing is sent, and after it
+    /// a TCP session is ended by `tcp`.
     async fn open_inbound_stream(
         &self,
         flags: u8,
         body: Vec<u8>,
-    ) -> AgentClientResult<(u32, mpsc::Receiver<InboundFrame>)> {
+        tcp: Option<TcpAbandon>,
+    ) -> AgentClientResult<(u32, mpsc::Receiver<InboundFrame>, Option<TcpCancelOnDrop>)> {
         let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
         let id = self.reserve_id(tx).await?;
 
-        if let Err(e) = self.write_frame_owned(id, flags, body).await {
+        let mut guard = OpenGuard {
+            owner: self.owner.clone(),
+            id,
+            phase: OpenPhase::Reserved,
+            rx: Some(rx),
+            tcp,
+        };
+        let written = self
+            .write_frame_and_commit(id, flags, body, || guard.phase = OpenPhase::Committed)
+            .await;
+        let (rx, tcp) = guard.into_parts();
+        if let Err(e) = written {
             self.pending.lock().await.remove(&id);
             return Err(e);
         }
 
-        Ok((id, rx))
+        Ok((id, rx, tcp))
     }
 
     /// Send a follow-up raw frame on an existing correlation id.
@@ -603,6 +675,9 @@ impl AgentClient {
 
     /// Open a streaming typed session. Flags are derived from the message type.
     /// Returns the assigned id and a typed receiver.
+    ///
+    /// A `TcpConnect` session is closed in the sandbox when the receiver is dropped before the
+    /// session ended, or when this future is dropped after its request was sent.
     pub async fn stream<T: Serialize>(
         &self,
         t: MessageType,
@@ -611,14 +686,18 @@ impl AgentClient {
         self.ensure_version_compat(t)?;
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
-        let (id, raw_rx) = self.open_inbound_stream(flags, body).await?;
+        let tcp = self.tcp_abandon(t, &body)?;
+        let (id, raw_rx, tcp) = self.open_inbound_stream(flags, body, tcp).await?;
 
         let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
-        tokio::spawn(decode_stream_task(raw_rx, tx));
+        tokio::spawn(decode_stream_task(raw_rx, tx, tcp));
         Ok((id, rx))
     }
 
     /// Opens a streaming typed session that can receive both control messages and raw bulk data.
+    ///
+    /// A `TcpConnect` session is closed in the sandbox when the receiver is dropped before the
+    /// session ended, or when this future is dropped after its request was sent.
     pub async fn stream_frames<T: Serialize>(
         &self,
         t: MessageType,
@@ -627,10 +706,11 @@ impl AgentClient {
         self.ensure_version_compat(t)?;
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
-        let (id, raw_rx) = self.open_inbound_stream(flags, body).await?;
+        let tcp = self.tcp_abandon(t, &body)?;
+        let (id, raw_rx, tcp) = self.open_inbound_stream(flags, body, tcp).await?;
 
         let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
-        tokio::spawn(decode_frame_stream_task(raw_rx, tx));
+        tokio::spawn(decode_frame_stream_task(raw_rx, tx, tcp));
         Ok((id, rx))
     }
 
@@ -714,8 +794,14 @@ impl AgentClient {
     }
 
     /// Cancel an entire raw-bulk correlation and retain its route through terminal cleanup.
+    ///
+    /// Sends nothing when the client already cancelled the correlation because its receiver was
+    /// dropped.
     pub async fn cancel_bulk(&self, id: u32, cancel: &BulkCancel) -> AgentClientResult<()> {
         if let Some(route) = self.pending.lock().await.get_mut(&id) {
+            if route.state == CorrelationState::Retired {
+                return Ok(());
+            }
             route.state = CorrelationState::Cancelling;
         }
         self.send(id, MessageType::BulkCancel, cancel).await
@@ -732,6 +818,31 @@ impl AgentClient {
 //--------------------------------------------------------------------------------------------------
 
 impl AgentClient {
+    /// Chooses how to end a TCP session whose caller goes away; `None` for every other stream.
+    fn tcp_abandon(&self, t: MessageType, body: &[u8]) -> AgentClientResult<Option<TcpAbandon>> {
+        if t != MessageType::TcpConnect {
+            return Ok(None);
+        }
+
+        let opening: Message = ciborium::from_reader(body).map_err(ProtocolError::from)?;
+        let request: TcpConnect = opening.payload()?;
+        let version = self.protocol.version();
+        // A session with a bulk offer holds one of the relay's per-connection stream slots until
+        // the sandbox's terminal, and only `BulkCancel` is answered with one.
+        if request.bulk.is_some() && self.negotiated_version >= BULK_PROTOCOL_VERSION {
+            let cancel = BulkCancel {
+                kind: BulkKind::Tcp,
+                reason: BulkCancelReason::CallerCancelled,
+                message: "the TCP stream's receiver was dropped".into(),
+            };
+            let body = encode_message_body(version, MessageType::BulkCancel, &cancel)?;
+            return Ok(Some(TcpAbandon::Cancel(body)));
+        }
+
+        let body = encode_message_body(version, MessageType::TcpClose, &TcpClose {})?;
+        Ok(Some(TcpAbandon::Close(body)))
+    }
+
     /// Reserve a unique correlation ID from the relay-assigned range.
     ///
     /// IDs are single-use for this connection. Exhaustion requires reconnecting for a fresh range
@@ -809,6 +920,85 @@ impl AgentClient {
             ack,
         });
         written.await.map_err(|_| AgentClientError::Closed)?
+    }
+}
+
+impl TcpCancelOnDrop {
+    /// Ends the session for a caller that stopped receiving it, using the route's receiver.
+    ///
+    /// Sends nothing when a terminal already ended the route, or when the caller cancelled or
+    /// forgot it. After a `BulkCancel`, waits for the sandbox's terminal for as long as the
+    /// connection lives, warning once when none arrives within [`CANCEL_TERMINAL_WARN_AFTER`].
+    async fn run(self, mut rx: mpsc::Receiver<InboundFrame>) {
+        let Some(pending) = self.owner.pending.upgrade() else {
+            return;
+        };
+        {
+            let mut map = pending.lock().await;
+            let Some(route) = map
+                .get_mut(&self.id)
+                .filter(|route| route.state == CorrelationState::Active)
+            else {
+                return;
+            };
+            match self.end {
+                TcpAbandon::Cancel(_) => route.state = CorrelationState::Retired,
+                TcpAbandon::Close(_) => {
+                    map.remove(&self.id);
+                }
+            }
+        }
+        // No strong reference may outlive the client during the wait below.
+        drop(pending);
+
+        let (t, body) = match self.end {
+            TcpAbandon::Cancel(body) => (MessageType::BulkCancel, body),
+            TcpAbandon::Close(body) => (MessageType::TcpClose, body),
+        };
+        let (ack, _) = oneshot::channel();
+        let command = WriterCommand {
+            frame: WriterFrame::Control(RawFrame {
+                id: self.id,
+                flags: t.flags(),
+                body,
+            }),
+            ack,
+        };
+        // A closed writer means the connection is gone, and the relay ends its sessions with it.
+        if self.owner.writer.send(command).await.is_err() || t == MessageType::TcpClose {
+            return;
+        }
+
+        // The retired route discards every frame, so the receiver closes only when the terminal
+        // removes the route or the connection ends.
+        let answered = tokio::time::timeout(CANCEL_TERMINAL_WARN_AFTER, async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        if answered.is_err() {
+            tracing::warn!(
+                id = self.id,
+                kind = ?BulkKind::Tcp,
+                "agent client: sandbox has not ended a cancelled TCP session; still waiting"
+            );
+            while rx.recv().await.is_some() {}
+        }
+    }
+}
+
+impl OpenGuard {
+    /// Hands the receiver, and the TCP session's cancel, to the opened stream.
+    fn into_parts(mut self) -> (mpsc::Receiver<InboundFrame>, Option<TcpCancelOnDrop>) {
+        let rx = self
+            .rx
+            .take()
+            .expect("the guard holds the receiver until it is handed over here");
+        let tcp = self.tcp.take().map(|end| TcpCancelOnDrop {
+            owner: self.owner.clone(),
+            id: self.id,
+            end,
+        });
+        (rx, tcp)
     }
 }
 
@@ -928,6 +1118,10 @@ where
     ));
     #[cfg(not(all(feature = "uds", unix)))]
     let writer_handle = tokio::spawn(stream_writer_loop(writer, writer_rx, control_rx));
+    let owner = StreamOwner {
+        pending: Arc::downgrade(&pending),
+        writer: writer_tx.clone(),
+    };
 
     Ok(AgentClient {
         exec_controller: None,
@@ -939,6 +1133,7 @@ where
         protocol: handshake.protocol,
         negotiated_version: handshake.negotiated_version,
         pending,
+        owner,
         reader_handle,
         writer_handle,
         ready_body: handshake.ready_body,
@@ -1363,8 +1558,15 @@ async fn dispatch_frame(frame: InboundFrame, pending: &Arc<Mutex<HashMap<u32, Co
             tracing::trace!("agent client: no pending handler for id={id}");
             return;
         };
-        if route.state == CorrelationState::Cancelling && flags == FLAG_BULK {
-            return;
+        match route.state {
+            CorrelationState::Retired => {
+                if is_terminal {
+                    map.remove(&id);
+                }
+                return;
+            }
+            CorrelationState::Cancelling if flags == FLAG_BULK => return,
+            CorrelationState::Active | CorrelationState::Cancelling => {}
         }
         let tx = route.tx.clone();
         if is_terminal {
@@ -1379,8 +1581,23 @@ async fn dispatch_frame(frame: InboundFrame, pending: &Arc<Mutex<HashMap<u32, Co
 }
 
 /// Translate a stream of raw frames into typed messages.
-async fn decode_stream_task(mut raw_rx: mpsc::Receiver<InboundFrame>, tx: mpsc::Sender<Message>) {
-    while let Some(frame) = raw_rx.recv().await {
+///
+/// Returns when the route ends. If the decoder stops first, `tcp` ends the session.
+async fn decode_stream_task(
+    mut raw_rx: mpsc::Receiver<InboundFrame>,
+    tx: mpsc::Sender<Message>,
+    tcp: Option<TcpCancelOnDrop>,
+) {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            frame = raw_rx.recv() => match frame {
+                Some(frame) => frame,
+                // A terminal was delivered or the connection closed.
+                None => return,
+            },
+            () = tx.closed() => break,
+        };
         #[cfg(all(feature = "uds", unix))]
         let frame = match frame {
             InboundFrame::Raw(frame) => frame,
@@ -1407,14 +1624,30 @@ async fn decode_stream_task(mut raw_rx: mpsc::Receiver<InboundFrame>, tx: mpsc::
             }
         }
     }
+
+    if let Some(tcp) = tcp {
+        tcp.run(raw_rx).await;
+    }
 }
 
 /// Translates raw relay frames into generation-aware control or bulk items.
+///
+/// Returns when the route ends. If the decoder stops first, `tcp` ends the session.
 async fn decode_frame_stream_task(
     mut raw_rx: mpsc::Receiver<InboundFrame>,
     tx: mpsc::Sender<AgentFrame>,
+    tcp: Option<TcpCancelOnDrop>,
 ) {
-    while let Some(frame) = raw_rx.recv().await {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            frame = raw_rx.recv() => match frame {
+                Some(frame) => frame,
+                // A terminal was delivered or the connection closed.
+                None => return,
+            },
+            () = tx.closed() => break,
+        };
         let decoded = match frame {
             #[cfg(all(feature = "uds", unix))]
             InboundFrame::Bulk(record) => Ok(AgentFrame::Bulk(record)),
@@ -1435,6 +1668,10 @@ async fn decode_frame_stream_task(
                 break;
             }
         }
+    }
+
+    if let Some(tcp) = tcp {
+        tcp.run(raw_rx).await;
     }
 }
 
@@ -1500,6 +1737,41 @@ impl Drop for AgentClient {
     fn drop(&mut self) {
         self.reader_handle.abort();
         self.writer_handle.abort();
+    }
+}
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        let Some(rx) = self.rx.take() else {
+            return;
+        };
+        // Without a runtime the connection's own tasks are gone too.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        match self.phase {
+            OpenPhase::Reserved => {
+                let pending = self.owner.pending.clone();
+                let id = self.id;
+                runtime.spawn(async move {
+                    if let Some(pending) = pending.upgrade() {
+                        pending.lock().await.remove(&id);
+                    }
+                });
+            }
+            OpenPhase::Committed => {
+                let Some(end) = self.tcp.take() else {
+                    return;
+                };
+                let tcp = TcpCancelOnDrop {
+                    owner: self.owner.clone(),
+                    id: self.id,
+                    end,
+                };
+                runtime.spawn(tcp.run(rx));
+            }
+        }
     }
 }
 
@@ -2290,5 +2562,435 @@ mod tests {
         );
         assert!(!client.pending.lock().await.contains_key(&id));
         server.await.unwrap();
+    }
+
+    /// Connects to an in-test relay whose `core.ready` advertises `generation`.
+    #[cfg(feature = "stream")]
+    async fn connect_test_relay(generation: u8) -> (AgentClient, tokio::io::DuplexStream) {
+        use tokio::io::AsyncWriteExt;
+
+        let (client_io, mut relay) = tokio::io::duplex(1024 * 1024);
+        let mut ready = Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
+        ready.v = generation;
+        relay.write_all(&1u32.to_be_bytes()).await.unwrap();
+        relay.write_all(&1024u32.to_be_bytes()).await.unwrap();
+        codec::write_message(&mut relay, &ready).await.unwrap();
+
+        let client = AgentClient::connect_stream(client_io).await.unwrap();
+        (client, relay)
+    }
+
+    #[cfg(feature = "stream")]
+    async fn next_client_message(relay: &mut tokio::io::DuplexStream) -> Message {
+        let frame = tokio::time::timeout(Duration::from_secs(1), codec::read_raw_frame(relay))
+            .await
+            .expect("client sent no frame")
+            .unwrap();
+        codec::raw_frame_to_message(frame).unwrap()
+    }
+
+    #[cfg(feature = "stream")]
+    async fn assert_no_client_frame(relay: &mut tokio::io::DuplexStream) {
+        let read =
+            tokio::time::timeout(Duration::from_millis(200), codec::read_raw_frame(relay)).await;
+        assert!(read.is_err(), "client sent an unexpected frame: {read:?}");
+    }
+
+    #[cfg(feature = "stream")]
+    async fn send_guest<T: Serialize>(
+        relay: &mut tokio::io::DuplexStream,
+        t: MessageType,
+        id: u32,
+        payload: &T,
+    ) {
+        let message = Message::with_payload(t, id, payload).unwrap();
+        codec::write_message(relay, &message).await.unwrap();
+    }
+
+    #[cfg(feature = "stream")]
+    fn assert_caller_cancelled(message: &Message, id: u32) {
+        use microsandbox_protocol::bulk::BulkCancelReason;
+
+        assert_eq!(message.t, MessageType::BulkCancel);
+        assert_eq!(message.id, id);
+        let cancel: BulkCancel = message.payload().unwrap();
+        assert_eq!(cancel.kind, BulkKind::Tcp);
+        assert_eq!(cancel.reason, BulkCancelReason::CallerCancelled);
+    }
+
+    #[cfg(feature = "stream")]
+    fn tcp_connect(bulk: bool) -> microsandbox_protocol::tcp::TcpConnect {
+        microsandbox_protocol::tcp::TcpConnect {
+            host: "example.test".into(),
+            port: 80,
+            bulk: bulk.then(microsandbox_protocol::bulk::BulkOffer::tcp),
+        }
+    }
+
+    /// Opens a bulk TCP session and lets the guest connect and accept the offer.
+    #[cfg(feature = "stream")]
+    async fn open_connected_bulk_tcp(
+        client: &AgentClient,
+        relay: &mut tokio::io::DuplexStream,
+    ) -> (u32, mpsc::Receiver<AgentFrame>) {
+        use microsandbox_protocol::bulk::{
+            BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkAccepted,
+            DEFAULT_BULK_RECORD_PAYLOAD, DEFAULT_BULK_WINDOW,
+        };
+        use microsandbox_protocol::tcp::TcpConnected;
+
+        let (id, mut frames) = client
+            .stream_frames(MessageType::TcpConnect, &tcp_connect(true))
+            .await
+            .unwrap();
+        assert_eq!(next_client_message(relay).await.t, MessageType::TcpConnect);
+        send_guest(relay, MessageType::TcpConnected, id, &TcpConnected {}).await;
+        let accepted = BulkAccepted {
+            kind: BulkKind::Tcp,
+            flows: BULK_FLOW_MASK_HOST_TO_GUEST | BULK_FLOW_MASK_GUEST_TO_HOST,
+            format: 1,
+            max_record_payload: DEFAULT_BULK_RECORD_PAYLOAD,
+            host_to_guest_credit_limit: DEFAULT_BULK_WINDOW,
+            guest_to_host_credit_limit: DEFAULT_BULK_WINDOW,
+        };
+        send_guest(relay, MessageType::BulkAccepted, id, &accepted).await;
+        assert!(
+            matches!(frames.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::TcpConnected)
+        );
+        assert!(
+            matches!(frames.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::BulkAccepted)
+        );
+        (id, frames)
+    }
+
+    #[cfg(feature = "stream")]
+    fn caller_cancel() -> BulkCancel {
+        BulkCancel {
+            kind: BulkKind::Tcp,
+            reason: microsandbox_protocol::bulk::BulkCancelReason::CallerCancelled,
+            message: "test cancellation".into(),
+        }
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn dropped_open_after_send_cancels_the_session() {
+        use microsandbox_protocol::tcp::TcpConnected;
+        use std::future::Future;
+        use std::task::Poll;
+
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let request = tcp_connect(true);
+        let mut open = Box::pin(client.stream_frames(MessageType::TcpConnect, &request));
+
+        // On this single-threaded runtime one poll queues the opening frame and parks on the
+        // writer's acknowledgement, because the writer task has not run yet.
+        let pending =
+            std::future::poll_fn(|cx| Poll::Ready(open.as_mut().poll(cx).is_pending())).await;
+        assert!(pending);
+        drop(open);
+
+        let opening = next_client_message(&mut relay).await;
+        assert_eq!(opening.t, MessageType::TcpConnect);
+        send_guest(
+            &mut relay,
+            MessageType::TcpConnected,
+            opening.id,
+            &TcpConnected {},
+        )
+        .await;
+        assert_caller_cancelled(&next_client_message(&mut relay).await, opening.id);
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn dropped_receiver_after_connected_cancels_the_session() {
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let (id, frames) = open_connected_bulk_tcp(&client, &mut relay).await;
+
+        // The guest sends nothing more, so only the dropped receiver can end the session.
+        drop(frames);
+
+        assert_caller_cancelled(&next_client_message(&mut relay).await, id);
+        assert!(client.pending.lock().await.contains_key(&id));
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn dropped_receiver_on_inline_session_closes_it() {
+        use microsandbox_protocol::tcp::TcpConnected;
+
+        // Generation 7 predates raw bulk: the session takes no relay slot and owes no terminal.
+        let (client, mut relay) = connect_test_relay(7).await;
+        let (id, mut frames) = client
+            .stream_frames(MessageType::TcpConnect, &tcp_connect(false))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_client_message(&mut relay).await.t,
+            MessageType::TcpConnect
+        );
+        send_guest(&mut relay, MessageType::TcpConnected, id, &TcpConnected {}).await;
+        assert!(frames.recv().await.is_some());
+
+        drop(frames);
+
+        let close = next_client_message(&mut relay).await;
+        assert_eq!(close.t, MessageType::TcpClose);
+        assert_eq!(close.id, id);
+        assert!(!client.pending.lock().await.contains_key(&id));
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn explicit_cancel_then_drop_sends_one_cancel() {
+        use microsandbox_protocol::tcp::TcpFailed;
+
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let (id, frames) = open_connected_bulk_tcp(&client, &mut relay).await;
+
+        client.cancel_bulk(id, &caller_cancel()).await.unwrap();
+        drop(frames);
+
+        assert_caller_cancelled(&next_client_message(&mut relay).await, id);
+        assert_no_client_frame(&mut relay).await;
+        let failed = TcpFailed {
+            error: "cancelled".into(),
+        };
+        send_guest(&mut relay, MessageType::TcpFailed, id, &failed).await;
+        assert_no_client_frame(&mut relay).await;
+        assert!(!client.pending.lock().await.contains_key(&id));
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn dropped_receiver_then_explicit_cancel_sends_one_cancel() {
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let (id, frames) = open_connected_bulk_tcp(&client, &mut relay).await;
+
+        drop(frames);
+        assert_caller_cancelled(&next_client_message(&mut relay).await, id);
+        client.cancel_bulk(id, &caller_cancel()).await.unwrap();
+
+        assert_no_client_frame(&mut relay).await;
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn terminal_then_drop_sends_nothing() {
+        use microsandbox_protocol::tcp::TcpClosed;
+
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let (id, mut frames) = open_connected_bulk_tcp(&client, &mut relay).await;
+
+        send_guest(&mut relay, MessageType::TcpClosed, id, &TcpClosed {}).await;
+        assert!(
+            matches!(frames.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::TcpClosed)
+        );
+        drop(frames);
+
+        assert_no_client_frame(&mut relay).await;
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn dropped_open_before_commit_sends_nothing() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let request = tcp_connect(true);
+
+        // The writer task has not run yet, so these opens fill its queue and the last one waits
+        // for room before its frame is committed.
+        let mut queued = Vec::new();
+        for _ in 0..WRITER_QUEUE_CAPACITY {
+            let mut open = Box::pin(client.stream_frames(MessageType::TcpConnect, &request));
+            let pending =
+                std::future::poll_fn(|cx| Poll::Ready(open.as_mut().poll(cx).is_pending())).await;
+            assert!(pending);
+            queued.push(open);
+        }
+        let mut uncommitted = Box::pin(client.stream_frames(MessageType::TcpConnect, &request));
+        let pending =
+            std::future::poll_fn(|cx| Poll::Ready(uncommitted.as_mut().poll(cx).is_pending()))
+                .await;
+        assert!(pending);
+        let uncommitted_id = WRITER_QUEUE_CAPACITY as u32 + 1;
+        assert!(client.pending.lock().await.contains_key(&uncommitted_id));
+        drop(uncommitted);
+
+        for _ in 0..WRITER_QUEUE_CAPACITY {
+            assert_eq!(
+                next_client_message(&mut relay).await.t,
+                MessageType::TcpConnect
+            );
+        }
+        assert_no_client_frame(&mut relay).await;
+        assert!(!client.pending.lock().await.contains_key(&uncommitted_id));
+
+        let (next_id, _frames) = open_next_bulk_tcp(&client, &mut relay).await;
+        assert_eq!(next_id, uncommitted_id + 1);
+        drop(queued);
+    }
+
+    /// Opens one more bulk TCP session while the relay reads its opening frame.
+    #[cfg(feature = "stream")]
+    async fn open_next_bulk_tcp(
+        client: &AgentClient,
+        relay: &mut tokio::io::DuplexStream,
+    ) -> (u32, mpsc::Receiver<AgentFrame>) {
+        let request = tcp_connect(true);
+        let (opened, opening) = tokio::join!(
+            client.stream_frames(MessageType::TcpConnect, &request),
+            next_client_message(relay)
+        );
+        let (id, frames) = opened.unwrap();
+        assert_eq!(opening.t, MessageType::TcpConnect);
+        assert_eq!(opening.id, id);
+        (id, frames)
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn exec_stream_receiver_drop_is_unchanged() {
+        use microsandbox_protocol::exec::{ExecRequest, ExecStdout};
+
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let request = ExecRequest {
+            cmd: "/bin/true".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+        let (id, rx) = client
+            .stream(MessageType::ExecRequest, &request)
+            .await
+            .unwrap();
+        assert_eq!(
+            next_client_message(&mut relay).await.t,
+            MessageType::ExecRequest
+        );
+
+        drop(rx);
+        let stdout = ExecStdout {
+            data: b"late".to_vec(),
+        };
+        send_guest(&mut relay, MessageType::ExecStdout, id, &stdout).await;
+
+        assert_no_client_frame(&mut relay).await;
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test(start_paused = true)]
+    async fn late_frames_and_second_terminal_after_cancel_are_discarded() {
+        use microsandbox_protocol::bulk::BulkFlow;
+        use microsandbox_protocol::tcp::{TcpConnected, TcpFailed};
+
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let (id, frames) = open_connected_bulk_tcp(&client, &mut relay).await;
+        drop(frames);
+        assert_caller_cancelled(&next_client_message(&mut relay).await, id);
+
+        send_guest(&mut relay, MessageType::TcpConnected, id, &TcpConnected {}).await;
+        codec::write_bulk_record(
+            &mut relay,
+            &BulkRecord {
+                id,
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::GuestToHost,
+                offset: 0,
+                payload: b"late".as_slice().into(),
+            },
+        )
+        .await
+        .unwrap();
+        let failed = TcpFailed {
+            error: "cancelled".into(),
+        };
+        send_guest(&mut relay, MessageType::TcpFailed, id, &failed).await;
+        send_guest(&mut relay, MessageType::TcpFailed, id, &failed).await;
+
+        // Past the warning delay: the answered cancel left the connection in service.
+        tokio::time::sleep(CANCEL_TERMINAL_WARN_AFTER * 2).await;
+        assert!(!client.pending.lock().await.contains_key(&id));
+        open_next_bulk_tcp(&client, &mut relay).await;
+    }
+
+    /// Counts warning events from this crate.
+    #[cfg(feature = "stream")]
+    #[derive(Clone, Default)]
+    struct WarningCount(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[cfg(feature = "stream")]
+    impl tracing::Subscriber for WarningCount {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let metadata = event.metadata();
+            if *metadata.level() == tracing::Level::WARN
+                && metadata
+                    .target()
+                    .starts_with(module_path!().trim_end_matches("::tests"))
+            {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_cancel_keeps_the_connection_and_warns_once() {
+        use microsandbox_protocol::tcp::TcpFailed;
+
+        let warnings = WarningCount::default();
+        let _logging = tracing::subscriber::set_default(warnings.clone());
+        let (client, mut relay) = connect_test_relay(PROTOCOL_VERSION).await;
+        let (id, frames) = open_connected_bulk_tcp(&client, &mut relay).await;
+        let (other, mut other_frames) = open_next_bulk_tcp(&client, &mut relay).await;
+
+        drop(frames);
+        assert_caller_cancelled(&next_client_message(&mut relay).await, id);
+
+        tokio::time::sleep(CANCEL_TERMINAL_WARN_AFTER - Duration::from_millis(100)).await;
+        assert_eq!(warnings.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        tokio::time::sleep(CANCEL_TERMINAL_WARN_AFTER * 4).await;
+        assert_eq!(warnings.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The connection and the other session still work, and the cancelled route still waits.
+        assert!(client.pending.lock().await.contains_key(&id));
+        let failed = TcpFailed {
+            error: "other".into(),
+        };
+        send_guest(&mut relay, MessageType::TcpFailed, other, &failed).await;
+        assert!(
+            matches!(other_frames.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::TcpFailed)
+        );
+        open_next_bulk_tcp(&client, &mut relay).await;
+
+        // A late terminal still ends the cancelled route.
+        send_guest(&mut relay, MessageType::TcpFailed, id, &failed).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!client.pending.lock().await.contains_key(&id));
+        assert_eq!(warnings.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

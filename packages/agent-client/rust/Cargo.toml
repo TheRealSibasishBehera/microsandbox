@@ -38,4 +38,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util"] }
