@@ -2076,6 +2076,10 @@ mod tests {
 
     use super::*;
 
+    const OPEN_FILE_HELPER_ENV: &str = "MSB_AGENTD_OPEN_FILE_LIMIT_HELPER";
+    const OPEN_FILE_HELPER_SENTINEL: &str = "open-file-limit-helper-passed";
+    const OPEN_FILE_TEST_NAME: &str =
+        "session::tests::exec_children_keep_the_inherited_open_file_limit";
     const REAP_HELPER_ENV: &str = "MSB_AGENTD_SESSION_REAP_HELPER";
     const REAP_HELPER_SENTINEL: &str = "session-reap-helper-passed";
     const REAP_TEST_NAME: &str = "session::tests::test_spawn_reaps_adopted_descendant";
@@ -2792,6 +2796,124 @@ mod tests {
                         "legacy execution must not wait for acknowledgements"
                     );
                 }
+            }
+        }
+    }
+
+    // The scenario changes this process's open-file limit and records agentd's inherited one,
+    // so it runs in its own test process.
+    #[test]
+    fn exec_children_keep_the_inherited_open_file_limit() {
+        if std::env::var_os(OPEN_FILE_HELPER_ENV).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("open-file limit test runtime");
+            runtime.block_on(run_open_file_limit_scenario());
+            println!("{OPEN_FILE_HELPER_SENTINEL}");
+            return;
+        }
+
+        let mut helper = StdCommand::new(std::env::current_exe().expect("current test binary"))
+            .args(["--exact", OPEN_FILE_TEST_NAME, "--nocapture"])
+            .env(OPEN_FILE_HELPER_ENV, "1")
+            .stdout(StdStdio::piped())
+            .spawn()
+            .expect("spawn isolated open-file limit test");
+        let mut output = String::new();
+        helper
+            .stdout
+            .take()
+            .expect("helper stdout")
+            .read_to_string(&mut output)
+            .expect("read helper stdout");
+
+        match helper.wait() {
+            Ok(status) => assert!(status.success(), "helper failed: {status}\n{output}"),
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {}
+            Err(error) => panic!("wait for helper: {error}"),
+        }
+        assert!(
+            output.contains(OPEN_FILE_HELPER_SENTINEL),
+            "helper did not complete the open-file limit scenario:\n{output}"
+        );
+    }
+
+    async fn run_open_file_limit_scenario() {
+        // Start where the kernel starts PID 1: soft 1024, hard 4096.
+        let inherited = libc::rlimit {
+            rlim_cur: 1024,
+            rlim_max: 4096,
+        };
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &inherited) },
+            0
+        );
+
+        rlimit::raise_own_open_file_limit().unwrap();
+
+        let nr_open: u64 = std::fs::read_to_string("/proc/sys/fs/nr_open")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let expected = rlimit::AGENTD_OPEN_FILE_LIMIT.min(nr_open).max(4096);
+        let mut raised = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut raised) },
+            0
+        );
+        assert_eq!((raised.rlim_cur, raised.rlim_max), (expected, expected));
+
+        let requested = microsandbox_protocol::exec::ExecRlimit {
+            resource: "nofile".into(),
+            soft: 2048,
+            hard: 8192,
+        };
+        for tty in [false, true] {
+            for (rlimits, child) in [
+                (Vec::new(), "1024 4096"),
+                (vec![requested.clone()], "2048 8192"),
+            ] {
+                let (tx, mut rx) = SessionOutputSender::channel();
+                let req = ExecRequest {
+                    cmd: "/bin/sh".to_string(),
+                    args: vec![
+                        "-c".to_string(),
+                        "echo $(ulimit -S -n) $(ulimit -H -n)".to_string(),
+                    ],
+                    env: vec!["PATH=/usr/local/bin:/usr/bin:/bin".to_string()],
+                    cwd: None,
+                    user: None,
+                    tty,
+                    rows: 24,
+                    cols: 80,
+                    rlimits,
+                };
+                let _session =
+                    ExecSession::spawn(11, &req, tx, None, SecurityProfile::Default, None, None)
+                        .expect("spawn open-file limit probe");
+                let (code, stdout) = time::timeout(Duration::from_secs(10), async {
+                    let mut stdout = Vec::new();
+                    while let Some(envelope) = rx.recv().await {
+                        match envelope.output {
+                            SessionOutput::Stdout(data) => stdout.extend_from_slice(&data),
+                            SessionOutput::Exited(code) => return (code, stdout),
+                            SessionOutput::Stderr(_)
+                            | SessionOutput::Raw(_)
+                            | SessionOutput::Bulk(_) => {}
+                        }
+                    }
+                    panic!("session closed without an exit status");
+                })
+                .await
+                .expect("open-file limit probe timed out");
+
+                assert_eq!(code, 0);
+                assert_eq!(String::from_utf8_lossy(&stdout).trim(), child, "tty={tty}");
             }
         }
     }

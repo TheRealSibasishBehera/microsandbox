@@ -1,13 +1,70 @@
-//! Resource limit helpers shared between PID 1 init (sandbox-wide baseline)
-//! and exec sessions (per-request limits).
+//! Resource limit helpers shared between PID 1 init (sandbox-wide baseline),
+//! agentd's own open-file limit, and exec sessions (per-request limits).
+
+use std::sync::OnceLock;
 
 use microsandbox_protocol::exec::{ExecRlimit, RlimitResource};
 
 use crate::error::{AgentdError, AgentdResult};
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Open-file limit agentd sets for itself, soft and hard.
+///
+/// Every guest connection agentd relays holds one of its descriptors, and a sandbox may hold
+/// several thousand at once. 65,536 leaves room for that many connections plus exec pipes, PTYs and
+/// file handles, while still bounding what one agentd can pin. Descriptors cost nothing until used.
+pub(crate) const AGENTD_OPEN_FILE_LIMIT: u64 = 65_536;
+
+/// Kernel ceiling for any process's open-file limit.
+const NR_OPEN_PATH: &str = "/proc/sys/fs/nr_open";
+
+/// Open-file limit agentd inherited before raising its own, recorded once.
+static INHERITED_OPEN_FILE_LIMIT: OnceLock<libc::rlimit> = OnceLock::new();
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Raises agentd's own open-file limit, soft and hard, to [`AGENTD_OPEN_FILE_LIMIT`] capped by
+/// `fs.nr_open`, never below the inherited hard limit.
+///
+/// Exec children get the inherited limit back (see [`to_libc`]), so guest processes keep the
+/// limit they had before. Call it once, after any PID 1 handoff, so a separate init never inherits
+/// the raised limit.
+pub fn raise_own_open_file_limit() -> AgentdResult<()> {
+    let mut inherited = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut inherited) } != 0 {
+        return Err(AgentdError::Init(format!(
+            "failed to read open-file limit: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let nr_open = std::fs::read_to_string(NR_OPEN_PATH)
+        .map_err(|error| AgentdError::Init(format!("failed to read {NR_OPEN_PATH}: {error}")))?;
+    let nr_open = nr_open.trim().parse::<u64>().map_err(|error| {
+        AgentdError::Init(format!("invalid {NR_OPEN_PATH} value {nr_open:?}: {error}"))
+    })?;
+    INHERITED_OPEN_FILE_LIMIT.get_or_init(|| inherited);
+
+    let target = AGENTD_OPEN_FILE_LIMIT.min(nr_open).max(inherited.rlim_max);
+    let raised = libc::rlimit {
+        rlim_cur: target,
+        rlim_max: target,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } != 0 {
+        return Err(AgentdError::Init(format!(
+            "failed to raise open-file limit to {target}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
 
 /// Maps a wire-format resource name to the Linux `RLIMIT_*` constant, or
 /// `None` if the name is not a known [`RlimitResource`].
@@ -15,21 +72,37 @@ pub(crate) fn parse_rlimit_resource(name: &str) -> Option<libc::c_int> {
     RlimitResource::try_from(name).ok().map(resource_to_libc_id)
 }
 
-/// Pre-parses rlimits into `(resource_id, rlimit)` tuples ready for
-/// `setrlimit()`. Unknown resource names are filtered out.
+/// Pre-parses an exec child's limits into `(resource_id, rlimit)` tuples ready for
+/// `setrlimit()`, applied in order. Unknown resource names are filtered out.
 pub(crate) fn to_libc(rlimits: &[ExecRlimit]) -> Vec<(libc::c_int, libc::rlimit)> {
-    rlimits
-        .iter()
-        .filter_map(|rl| {
-            Some((
-                parse_rlimit_resource(&rl.resource)?,
-                libc::rlimit {
-                    rlim_cur: rl.soft,
-                    rlim_max: rl.hard,
-                },
-            ))
-        })
-        .collect()
+    exec_child_limits(INHERITED_OPEN_FILE_LIMIT.get().copied(), rlimits)
+}
+
+/// Requested limits, preceded by the open-file limit agentd inherited unless the request sets its
+/// own, so a child never keeps agentd's raised limit.
+fn exec_child_limits(
+    inherited_open_files: Option<libc::rlimit>,
+    rlimits: &[ExecRlimit],
+) -> Vec<(libc::c_int, libc::rlimit)> {
+    let requests_open_files = rlimits.iter().any(|rl| {
+        matches!(
+            RlimitResource::try_from(rl.resource.as_str()),
+            Ok(RlimitResource::Nofile)
+        )
+    });
+    let inherited = inherited_open_files
+        .filter(|_| !requests_open_files)
+        .map(|limit| (resource_to_libc_id(RlimitResource::Nofile), limit));
+    let requested = rlimits.iter().filter_map(|rl| {
+        Some((
+            parse_rlimit_resource(&rl.resource)?,
+            libc::rlimit {
+                rlim_cur: rl.soft,
+                rlim_max: rl.hard,
+            },
+        ))
+    });
+    inherited.into_iter().chain(requested).collect()
 }
 
 /// Applies sandbox-wide resource limits to the current process (PID 1).
@@ -91,5 +164,65 @@ fn resource_to_libc_id(resource: RlimitResource) -> libc::c_int {
         RlimitResource::Nice => RLIMIT_NICE,
         RlimitResource::Rtprio => RLIMIT_RTPRIO,
         RlimitResource::Rttime => RLIMIT_RTTIME,
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limit(soft: u64, hard: u64) -> libc::rlimit {
+        libc::rlimit {
+            rlim_cur: soft,
+            rlim_max: hard,
+        }
+    }
+
+    fn request(resource: &str, soft: u64, hard: u64) -> ExecRlimit {
+        ExecRlimit {
+            resource: resource.into(),
+            soft,
+            hard,
+        }
+    }
+
+    fn pairs(limits: Vec<(libc::c_int, libc::rlimit)>) -> Vec<(libc::c_int, u64, u64)> {
+        limits
+            .into_iter()
+            .map(|(resource, limit)| (resource, limit.rlim_cur, limit.rlim_max))
+            .collect()
+    }
+
+    #[test]
+    fn exec_child_limits_restore_inherited_open_files_before_requested_limits() {
+        let limits = exec_child_limits(Some(limit(1024, 4096)), &[request("memlock", 64, 128)]);
+
+        assert_eq!(
+            pairs(limits),
+            vec![
+                (resource_to_libc_id(RlimitResource::Nofile), 1024, 4096),
+                (resource_to_libc_id(RlimitResource::Memlock), 64, 128),
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_child_limits_leave_open_files_to_a_request_that_sets_them() {
+        let limits = exec_child_limits(
+            Some(limit(1024, 4096)),
+            &[request("NOFILE", 2048, 8192), request("memlock", 64, 128)],
+        );
+
+        assert_eq!(
+            pairs(limits),
+            vec![
+                (resource_to_libc_id(RlimitResource::Nofile), 2048, 8192),
+                (resource_to_libc_id(RlimitResource::Memlock), 64, 128),
+            ]
+        );
     }
 }

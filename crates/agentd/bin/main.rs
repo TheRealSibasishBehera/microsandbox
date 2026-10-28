@@ -6,7 +6,9 @@
 use std::process;
 
 #[cfg(target_os = "linux")]
-use microsandbox_agentd::{AgentdError, BootParams, agent, clock, handoff, init};
+use microsandbox_agentd::{
+    AgentdError, BootParams, agent, clock, handoff, init, raise_own_open_file_limit,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions: main
@@ -75,6 +77,12 @@ fn main() {
         && let Err(e) = handoff::do_handoff(spec)
     {
         exit_startup_failure(&port, &mut boot_console, "handoff", &e);
+    }
+
+    // After any handoff, so only agentd is raised. Keeping the inherited limit only bounds how many
+    // guest connections can be open at once, so a failure is not fatal.
+    if let Err(e) = raise_own_open_file_limit() {
+        eprintln!("agentd: keeping the inherited open-file limit: {e}");
     }
 
     // Phase 2: Build a single-threaded tokio runtime and run the agent loop.
