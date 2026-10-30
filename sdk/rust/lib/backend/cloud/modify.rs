@@ -12,7 +12,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use microsandbox_types::{
-    CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_NOT_CONFIRMED, CLOUD_MODIFICATION_REFUSED,
+    CLOUD_MODIFICATION_FAILED, CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_REFUSED,
     CLOUD_MODIFICATION_UNSUPPORTED, CloudErrorBody, CloudModificationRejection,
     CloudSandboxModificationApplyRequest, CloudSandboxModificationPlan,
     CloudSandboxModificationPlanRequest, CloudSecretValue,
@@ -108,7 +108,7 @@ enum ModifyErrorCode {
     InProgress,
     Refused,
     Unsupported,
-    NotConfirmed,
+    Failed,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -197,7 +197,7 @@ impl FromStr for ModifyErrorCode {
             CLOUD_MODIFICATION_IN_PROGRESS => Ok(Self::InProgress),
             CLOUD_MODIFICATION_REFUSED => Ok(Self::Refused),
             CLOUD_MODIFICATION_UNSUPPORTED => Ok(Self::Unsupported),
-            CLOUD_MODIFICATION_NOT_CONFIRMED => Ok(Self::NotConfirmed),
+            CLOUD_MODIFICATION_FAILED => Ok(Self::Failed),
             _ => Err(()),
         }
     }
@@ -266,7 +266,7 @@ fn classify(sent: SendOutcome) -> Attempt {
         (409, Some(ModifyErrorCode::Unsupported)) => {
             Attempt::Fail(cloud_http_error(status, typed.as_ref(), &body, APPLY_OP))
         }
-        (503, Some(ModifyErrorCode::NotConfirmed)) => {
+        (503, Some(ModifyErrorCode::Failed)) => {
             Attempt::Fail(MicrosandboxError::ModificationNotConfirmed {
                 cause: message.to_string(),
             })
@@ -285,7 +285,7 @@ fn classify(sent: SendOutcome) -> Attempt {
 }
 
 /// A failure after sending that leaves the result unknown. The server's own
-/// not-confirmed message already says whether a resend helps, so only causes the
+/// failure message already says whether a resend helps, so only causes the
 /// client builds go through here.
 fn result_unknown(cause: impl std::fmt::Display) -> MicrosandboxError {
     MicrosandboxError::ModificationNotConfirmed {

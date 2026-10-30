@@ -33,7 +33,7 @@ mod snapshots;
 mod specs;
 
 pub use modify::{
-    CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_NOT_CONFIRMED, CLOUD_MODIFICATION_REFUSED,
+    CLOUD_MODIFICATION_FAILED, CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_REFUSED,
     CLOUD_MODIFICATION_UNSUPPORTED, CloudModificationRejection,
     CloudSandboxModificationApplyRequest, CloudSandboxModificationPlanRequest,
     CloudSecretApplyEntry, CloudSecretMaterial, CloudSecretPlanEntry, CloudSecretValue,

@@ -305,10 +305,9 @@ fn classify_table() {
             reason: UnsupportedReason::NotAvailable(message),
         }) if message.ends_with("turned off")
     ));
-    let server_cause = "the change was saved, but the running sandbox does not hold the secret; it \
-                        applies at the next start";
+    let server_cause = "the stored secret state needs repair; contact support";
     assert!(matches!(
-        answered(503, error_json(CLOUD_MODIFICATION_NOT_CONFIRMED, server_cause)),
+        answered(503, error_json(CLOUD_MODIFICATION_FAILED, server_cause)),
         Attempt::Fail(MicrosandboxError::ModificationNotConfirmed { cause }) if cause == server_cause
     ));
     for (status, body) in [
@@ -329,17 +328,11 @@ fn classify_table() {
         );
     }
     assert!(matches!(
-        answered(
-            400,
-            error_json(CLOUD_MODIFICATION_NOT_CONFIRMED, "bad request")
-        ),
+        answered(400, error_json(CLOUD_MODIFICATION_FAILED, "bad request")),
         Attempt::Fail(MicrosandboxError::InvalidConfig(_))
     ));
     assert!(matches!(
-        answered(
-            409,
-            error_json(CLOUD_MODIFICATION_NOT_CONFIRMED, "conflict")
-        ),
+        answered(409, error_json(CLOUD_MODIFICATION_FAILED, "conflict")),
         Attempt::Fail(MicrosandboxError::CloudHttp { status: 409, .. })
     ));
     assert!(matches!(
@@ -372,10 +365,7 @@ fn error_codes_decode_once() {
         (CLOUD_MODIFICATION_IN_PROGRESS, ModifyErrorCode::InProgress),
         (CLOUD_MODIFICATION_REFUSED, ModifyErrorCode::Refused),
         (CLOUD_MODIFICATION_UNSUPPORTED, ModifyErrorCode::Unsupported),
-        (
-            CLOUD_MODIFICATION_NOT_CONFIRMED,
-            ModifyErrorCode::NotConfirmed,
-        ),
+        (CLOUD_MODIFICATION_FAILED, ModifyErrorCode::Failed),
     ] {
         assert_eq!(code.parse::<ModifyErrorCode>(), Ok(expected));
     }
@@ -966,10 +956,7 @@ async fn rejected_patches_send_nothing() {
 async fn no_value_in_debug_or_error() {
     let replies = vec![
         Reply::Hangup,
-        Reply::Json(
-            503,
-            error_json(CLOUD_MODIFICATION_NOT_CONFIRMED, "not confirmed"),
-        ),
+        Reply::Json(503, error_json(CLOUD_MODIFICATION_FAILED, "not confirmed")),
         Reply::Json(409, error_json(CLOUD_MODIFICATION_REFUSED, "refused")),
         Reply::Json(500, json!({})),
     ];

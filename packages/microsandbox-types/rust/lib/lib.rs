@@ -30,7 +30,7 @@ pub mod typescript;
 pub use microsandbox_types_macros::ConfigPatch;
 
 pub use cloud::{
-    CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_NOT_CONFIRMED, CLOUD_MODIFICATION_REFUSED,
+    CLOUD_MODIFICATION_FAILED, CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_REFUSED,
     CLOUD_MODIFICATION_UNSUPPORTED, CloudChangeKind, CloudConfigPlannedChange,
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
     CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,

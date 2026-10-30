@@ -25,9 +25,9 @@ pub const CLOUD_MODIFICATION_REFUSED: &str = "modification_refused";
 /// Error code: the server cannot modify this sandbox, or does not modify sandboxes (409).
 pub const CLOUD_MODIFICATION_UNSUPPORTED: &str = "modification_unsupported";
 
-/// Error code: the change did not complete as asked; it may be saved but not in effect, or
-/// its result is unknown (503).
-pub const CLOUD_MODIFICATION_NOT_CONFIRMED: &str = "modification_not_confirmed";
+/// Error code: saving the requested modification failed (503).
+/// The response explains the failure and whether retrying can help.
+pub const CLOUD_MODIFICATION_FAILED: &str = "modification_failed";
 
 //--------------------------------------------------------------------------------------------------
 // Types: Requests
@@ -1646,9 +1646,6 @@ mod tests {
         assert_eq!(CLOUD_MODIFICATION_IN_PROGRESS, "modification_in_progress");
         assert_eq!(CLOUD_MODIFICATION_REFUSED, "modification_refused");
         assert_eq!(CLOUD_MODIFICATION_UNSUPPORTED, "modification_unsupported");
-        assert_eq!(
-            CLOUD_MODIFICATION_NOT_CONFIRMED,
-            "modification_not_confirmed"
-        );
+        assert_eq!(CLOUD_MODIFICATION_FAILED, "modification_failed");
     }
 }
