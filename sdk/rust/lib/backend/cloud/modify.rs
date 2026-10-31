@@ -184,7 +184,7 @@ impl Backoff {
             return delay;
         }
         // A spread in [0.8, 1.2) from the process's random hasher keys.
-        let spread = (RandomState::new().hash_one(Instant::now()) % 4_001) as f64 / 10_000.0;
+        let spread = (RandomState::new().hash_one(Instant::now()) % 4_000) as f64 / 10_000.0;
         delay.mul_f64(0.8 + spread)
     }
 }
