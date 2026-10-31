@@ -44,6 +44,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::backend::LocalBackend;
+use crate::backend::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 pub use crate::snapshot::{LoadOpts, SaveOpts};
@@ -235,11 +236,11 @@ impl LocalBackend {
     pub(crate) async fn materialize_archive_for_child(
         &self,
         archive: &Path,
-        child_stage: &Path,
+        child_stage: &CreationStorage,
         disk_only: bool,
         base: Option<&str>,
         choices: &crate::sandbox::restore_resources::RestoreResources,
-        boot_overrides: crate::sandbox::RestoreBootOverrides,
+        caller_overrides: Option<&crate::SandboxConfigPatch>,
     ) -> MicrosandboxResult<ArchiveChildMaterialization> {
         let total_started = Instant::now();
         tokio::fs::create_dir_all(child_stage).await?;
@@ -393,15 +394,16 @@ impl LocalBackend {
             ));
         }
 
-        boot_overrides.validate_scope(
-            manifest.scope,
-            if disk_only {
-                crate::sandbox::config::SnapshotRestoreMode::DiskOnly
-            } else {
-                crate::sandbox::config::SnapshotRestoreMode::Full
-            },
-        )?;
-
+        if let Some(caller_overrides) = caller_overrides {
+            caller_overrides.validate_for_restore(
+                manifest.scope,
+                if disk_only {
+                    crate::sandbox::config::SnapshotRestoreMode::DiskOnly
+                } else {
+                    crate::sandbox::config::SnapshotRestoreMode::Full
+                },
+            )?;
+        }
         delta::resolve(self, &inventory, child_stage, cache_stage.path(), base).await?;
 
         if let SnapshotState::Checkpoint(state) = &manifest.state {
@@ -412,7 +414,7 @@ impl LocalBackend {
             validate_checkpoint_owned_inventory(&manifest, &checkpoint)?;
 
             if disk_only {
-                let materialized = super::materialize_checkpoint_child_disk_state(
+                let materialized = super::materialize_checkpoint_disk_for_child(
                     &extracted_closure,
                     &state.checkpoint_root,
                     &state.checkpoint_id,
@@ -1544,10 +1546,12 @@ pub(crate) async fn materialize_archive_for_child_with_base(
     base: Option<&str>,
     choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<ArchiveChildMaterialization> {
+    use crate::backend::local::creation::CreationStorage;
+
     local
         .materialize_archive_for_child(
             archive,
-            child_stage,
+            &CreationStorage::for_test(child_stage),
             disk_only,
             base,
             choices,
@@ -4040,11 +4044,8 @@ async fn install_staged_cache(
             .map(|layer| layer.diff_id.parse())
             .collect::<Result<Vec<microsandbox_image::Digest>, _>>()
             .map_err(|e| MicrosandboxError::Custom(format!("invalid cached layer diff_id: {e}")))?;
-        // Keep the imported cache paths pinned while the blocking rewrite completes.
-        let rewrite_cache = cache.clone();
-        tokio::task::spawn_blocking(move || rewrite_cache.rewrite_vmdk(&pinned_digest, &diff_ids))
-            .await
-            .map_err(|e| MicrosandboxError::Custom(format!("VMDK rewrite task failed: {e}")))??;
+        // Keep the imported cache paths pinned while the rewrite completes.
+        cache.rewrite_vmdk_async(&pinned_digest, &diff_ids).await?;
     }
     // The archive may describe an image already installed under this reference. Publish under
     // the image-cache gate, preserving equivalent local bytes and rejecting a concurrent retag.
@@ -6104,11 +6105,16 @@ mod tests {
         let error = local
             .materialize_archive_for_child(
                 &archive,
-                &rejected_stage,
+                &crate::backend::local::creation::CreationStorage::for_test(&rejected_stage),
                 false,
                 None,
                 &Default::default(),
-                crate::sandbox::RestoreBootOverrides { security: true },
+                Some(
+                    &crate::SandboxConfigPatch::new().spec(
+                        microsandbox_types::SandboxSpecPatch::new()
+                            .security_profile(microsandbox_types::SecurityProfile::Restricted),
+                    ),
+                ),
             )
             .await
             .err()
@@ -6131,11 +6137,16 @@ mod tests {
         let disk_restored = local
             .materialize_archive_for_child(
                 &archive,
-                &disk_child_stage,
+                &crate::backend::local::creation::CreationStorage::for_test(&disk_child_stage),
                 true,
                 None,
                 &Default::default(),
-                crate::sandbox::RestoreBootOverrides { security: true },
+                Some(
+                    &crate::SandboxConfigPatch::new().spec(
+                        microsandbox_types::SandboxSpecPatch::new()
+                            .security_profile(microsandbox_types::SecurityProfile::Restricted),
+                    ),
+                ),
             )
             .await
             .unwrap();

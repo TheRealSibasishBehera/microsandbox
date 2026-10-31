@@ -245,7 +245,8 @@ export type JsHttpBuilder = HttpBuilder
 
 /** Builds an HTTP CONNECT outbound proxy. */
 export declare class HttpConnectProxyBuilder {
-
+  /** Set username authentication and a host-side password source. */
+  credentials(username: string, password: SecretSourceInput): this
 }
 export type JsHttpConnectProxyBuilder = HttpConnectProxyBuilder
 
@@ -1283,6 +1284,8 @@ export declare class SandboxBuilder {
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Enable or disable nested virtualization for local sandboxes. */
+  nestedVirt(enabled: boolean): this
   /** Guest transparent huge-page policy selected at boot. */
   thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */

@@ -298,6 +298,7 @@ fn main() {
             println!(
                 "{}",
                 serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
+                    protected_guest_state: true,
                     protocols: vec![2, 1],
                     required_restore_backing: true,
                     tcp_accept_queue_size: true,
@@ -308,6 +309,9 @@ fn main() {
                     http_connect_proxy_auth: cfg!(feature = "net"),
                     guest_clock: true,
                     fs_state_limit: true,
+                    nested_virt: Some(
+                        microsandbox_runtime::nested_virt_supported().unwrap_or(false)
+                    ),
                     exec_limits: true,
                 })
                 .expect("serialize capabilities")

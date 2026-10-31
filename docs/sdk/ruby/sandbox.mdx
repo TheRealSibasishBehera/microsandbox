@@ -2000,7 +2000,7 @@ end
 gem install microsandbox
 ```
 
-Ruby 3.3, 3.4, and 4.0 are supported. When a matching platform gem is available, it carries the native extension; otherwise the source gem requires Rust 1.85 or newer to build it locally.
+Ruby 3.3, 3.4, and 4.0 are supported. When a matching platform gem is available, it carries the native extension; otherwise the source gem requires Rust 1.89 or newer to build it locally.
 
 Blocking native calls release Ruby's global VM lock (GVL), allowing other Ruby threads to run.
 
@@ -2191,3 +2191,11 @@ stream.close # => nil
 ```
 
 Stop observing logs. This does not stop the job.
+
+## Nested virtualization
+
+`nested_virt: true | false` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```ruby
+sandbox = Microsandbox::Sandbox.create("nested", image: "alpine", nested_virt: true)
+```

@@ -199,6 +199,8 @@ export interface NapiSandboxBuilderSetters {
   placementProfile(profile: string): this;
   memory(mib: number): this;
   maxMemory(mib: number): this;
+  /** Enable or disable nested virtualization for local sandboxes. */
+  nestedVirt(enabled: boolean): this;
   thp(policy: "always" | "madvise" | "never"): this;
   logLevel(level: string): this;
   quietLogs(): this;
@@ -1178,7 +1180,10 @@ export interface NapiOutboundProxyBuilder {
 }
 
 export interface NapiHttpConnectProxyBuilder {
-  readonly __httpConnectProxy?: never;
+  credentials(
+    username: string,
+    password: { kind: "env"; var: string },
+  ): this;
 }
 
 export interface NapiSocks4ProxyBuilder {

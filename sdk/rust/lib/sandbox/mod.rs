@@ -11,6 +11,7 @@ mod branch_batch;
 mod builder;
 #[cfg(feature = "local")]
 pub(crate) use builder::prepare_local_snapshot_restore;
+mod caller_config_overrides;
 #[cfg(feature = "cloud")]
 mod cloud;
 mod compact;
@@ -72,6 +73,8 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 #[cfg(feature = "local")]
 use microsandbox_image::progress_channel;
 
+#[cfg(feature = "local")]
+use crate::backend::local::creation::{CreationStorage, RemovalMode};
 use crate::{MicrosandboxResult, agent::AgentClient, backend::sandbox::SandboxIdentity};
 #[cfg(feature = "local")]
 use crate::{
@@ -122,12 +125,6 @@ pub(crate) fn reserved_label_prefix(key: &str) -> Option<&'static str> {
 pub(crate) use builder::{
     apply_checkpoint_restore_constraints, apply_snapshot_guest_clock, apply_snapshot_root_layout,
 };
-#[cfg(feature = "local")]
-pub(crate) use modify::control_checkpoint_create;
-#[cfg(feature = "local")]
-pub(crate) use modify::control_disk_checkpoint_create;
-#[cfg(feature = "local")]
-pub(crate) use modify::restore_requested_resources;
 #[cfg(feature = "local")]
 pub(crate) use patch::{apply_patches, build_flat_tree, build_upper_tree};
 #[cfg(all(feature = "local", windows))]
@@ -200,7 +197,6 @@ pub use microsandbox_types::{
 };
 pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
 #[cfg(feature = "local")]
-pub(crate) use restore_builder::RestoreBootOverrides;
 pub use restore_builder::RestoreBuilder;
 
 #[cfg(feature = "local")]
@@ -1827,7 +1823,14 @@ pub(super) async fn remove_local_persisted_sandbox(
     // The runtime lock is the authoritative ownership proof. A numeric PID can remain visible
     // while an exited Unix child is waiting to be reaped, or can already identify an unrelated
     // process after PID reuse, so it must not override successful lock acquisition.
-    crate::runtime::remove_sandbox_socket_artifacts_for(local_backend, name)?;
+    if crate::backend::local::creation::pending(pools.write(), expected_id).await? {
+        return local_backend
+            .remove_incomplete_sandbox(expected_id, name, RemovalMode::Recovery)
+            .await;
+    }
+
+    let _storage = CreationStorage::acquire(local_backend, name)?;
+    local_backend.remove_socket_artifacts(name)?;
     remove_dir_if_exists(&local_backend.sandboxes_dir().join(name))?;
     sandbox_entity::Entity::delete_by_id(expected_id)
         .exec(pools.write())

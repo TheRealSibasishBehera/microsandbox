@@ -39,13 +39,18 @@ Everything from the [quickstart](/getting-started/quickstart) works unchanged. W
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("hello")
+const sb = await Sandbox.builder("hello")
     .image("python")
     .memory(512)
     .create();
 
-const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
-console.log(output.stdout());
+try {
+    const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
+    console.log(output.stdout());
+} finally {
+    await sb.stop();
+    await Sandbox.remove("hello");
+}
 ```
 
 ```rust Rust
@@ -61,6 +66,7 @@ let output = sb.exec("python", ["-c", "print('Hello from the cloud!')"]).await?;
 println!("{}", output.stdout()?);
 
 sb.stop().await?;
+Sandbox::remove("hello").await?;
 ```
 
 ```python Python
@@ -72,6 +78,7 @@ output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"])
 print(output.stdout_text)
 
 await sb.stop()
+await Sandbox.remove("hello")
 ```
 
 ```go Go
@@ -82,9 +89,15 @@ sb, err := m.CreateSandbox(ctx, "hello",
 if err != nil {
     return err
 }
-defer sb.Stop(ctx)
+defer func() {
+    _ = sb.Stop(ctx)
+    _ = m.RemoveSandbox(ctx, "hello")
+}()
 
 output, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from the cloud!')"})
+if err != nil {
+    return err
+}
 fmt.Println(output.Stdout())
 ```
 
@@ -95,6 +108,7 @@ Microsandbox::Sandbox.with("hello", image: "python", memory: 512) do |sb|
   output = sb.exec("python", ["-c", "print('Hello from the cloud!')"])
   puts output.stdout
 end
+Microsandbox::Sandbox.remove("hello")
 ```
 
 ```bash CLI

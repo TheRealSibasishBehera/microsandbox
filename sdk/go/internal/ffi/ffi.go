@@ -1768,6 +1768,7 @@ type CreateOptions struct {
 	MaxCPUs              uint8                `json:"max_cpus,omitempty"`
 	CPUPlacement         string               `json:"cpu_placement,omitempty"`
 	PlacementProfile     string               `json:"placement_profile,omitempty"`
+	NestedVirt           *bool                `json:"nested_virt,omitempty"`
 	THP                  string               `json:"thp,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
@@ -1791,6 +1792,9 @@ type CreateOptions struct {
 	MaxDurationSecs      uint64               `json:"max_duration_secs,omitempty"`
 	IdleTimeoutSecs      uint64               `json:"idle_timeout_secs,omitempty"`
 	RegistryAuth         *RegistryAuthOptions `json:"registry_auth,omitempty"`
+	// RegistryAnonymous pulls without credentials. Mutually exclusive with
+	// RegistryAuth; libraries that predate it reject the request.
+	RegistryAnonymous bool `json:"registry_anonymous,omitempty"`
 	// RegistryInsecure pulls over plain HTTP instead of HTTPS.
 	RegistryInsecure bool `json:"registry_insecure,omitempty"`
 	// RegistryCACerts holds PEM-encoded CA root certificate bundles trusted

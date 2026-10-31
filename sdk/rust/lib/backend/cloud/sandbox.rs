@@ -109,16 +109,7 @@ impl CloudBackend {
         &self,
         mut builder: SandboxBuilder,
     ) -> MicrosandboxResult<SandboxConfig> {
-        let options = builder.prepare(Arc::new(self.clone())).await?;
-        // Cloud has no hotplug aperture. Equal maxima on concrete configs track the
-        // requested size, so let them follow any managed CPU or memory override.
-        let resources = &mut options.spec.resources;
-        if resources.max_cpus == resources.cpus {
-            resources.max_cpus = None;
-        }
-        if resources.max_memory_mib == resources.memory_mib {
-            resources.max_memory_mib = None;
-        }
+        builder.prepare(Arc::new(self.clone())).await?;
 
         // The cloud worker resolves image metadata. Device policy is applied on this client.
         builder.finish_cloud(self.config_sources())
@@ -561,6 +552,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
         )
     };
 
+    if config.spec.resources.nested_virt == Some(true) {
+        return Err(unsupported("nested_virt (local-only)"));
+    }
     if config.spec.resources.max_cpus != config.spec.resources.cpus {
         return Err(unsupported("max_cpus"));
     }
@@ -854,7 +848,15 @@ mod tests {
     async fn every_cloud_create_entry_point_sends_captured_file_policy() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-        for entry in 0..6 {
+        for (entry, cpus, memory, explicit_max) in (0..6).flat_map(|entry| {
+            [
+                (1, 512, false),
+                (1, 512, true),
+                (8, 2048, false),
+                (8, 2048, true),
+            ]
+            .map(|(cpus, memory, explicit_max)| (entry, cpus, memory, explicit_max))
+        }) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
@@ -915,12 +917,17 @@ mod tests {
             );
             let backend: Arc<dyn Backend> = Arc::new(backend);
             let request = || {
-                SandboxBuilder::new("policy-request")
+                let builder = SandboxBuilder::new("policy-request")
                     .image("alpine")
-                    .cpus(8)
-                    .memory(2048)
+                    .cpus(cpus)
+                    .memory(memory)
                     .workdir("/request")
-                    .shell("/bin/request")
+                    .shell("/bin/request");
+                if explicit_max {
+                    builder.max_cpus(cpus).max_memory(memory)
+                } else {
+                    builder
+                }
             };
             let empty =
                 crate::config::layers::BackendConfig::new(Default::default(), Default::default());
@@ -1348,7 +1355,9 @@ mod tests {
         config.spec.resources.memory_mib = 1024;
         config.spec.resources.max_memory_mib = 1024;
         config.spec.security_profile = microsandbox_types::SecurityProfile::Restricted;
-        config.restore_boot_overrides.security = true;
+        let mut options = crate::SandboxConfigPatch::new();
+        options.spec.security_profile = Some(config.spec.security_profile);
+        config.caller_config_overrides = Some(Box::new(options));
         config.spec.lifecycle.max_duration_secs = Some(60);
         config.spec.lifecycle.idle_timeout_secs = Some(10);
 
@@ -1533,13 +1542,16 @@ mod tests {
 
     #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
-        let cases: [(&str, ConfigMutation); 12] = [
+        let cases: [(&str, ConfigMutation); 13] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),
             ("max_memory", |config| {
                 config.spec.resources.max_memory_mib = 1024
             }),
             ("hostname", |config| {
                 config.spec.runtime.hostname = Some("worker".into())
+            }),
+            ("nested_virt (local-only)", |config| {
+                config.spec.resources.nested_virt = Some(true)
             }),
             ("guest_clock", |config| {
                 config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off)
