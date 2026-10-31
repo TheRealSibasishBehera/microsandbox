@@ -239,20 +239,16 @@ impl CloudBackend {
         Ok(plan.into())
     }
 
-    /// `POST /v1/sandboxes/:id/modifications`, sent once. The body is the only
+    /// `PUT /v1/sandboxes/:id`, sent once. The body is the only
     /// place a secret value travels; the caller reads and classifies the outcome.
-    pub(in crate::backend) async fn post_modification(
+    pub(in crate::backend) async fn put_modification(
         &self,
         id: &str,
         req: &CloudSandboxModificationApplyRequest,
         timeout: Duration,
     ) -> Result<Response, reqwest::Error> {
-        let url = format!(
-            "{}/v1/sandboxes/{}/modifications",
-            self.url,
-            urlencoding(id)
-        );
-        self.http.post(&url).json(req).timeout(timeout).send().await
+        let url = format!("{}/v1/sandboxes/{}", self.url, urlencoding(id));
+        self.http.put(&url).json(req).timeout(timeout).send().await
     }
 
     /// `POST /v1/sandboxes/by-name/:name/stop`.
@@ -889,7 +885,7 @@ mod tests {
             r#"{"error":{"code":"modification_unsupported","message":"secrets: not supported"}}"#,
         )
         .unwrap();
-        let op = "POST /v1/sandboxes/:id/modifications";
+        let op = "PUT /v1/sandboxes/:id";
 
         assert!(matches!(
             cloud_http_error(409, Some(&unsupported), "", op),
