@@ -3039,8 +3039,8 @@ mod tests {
     /// refuses them; configured secrets are keyed by name, one spec each.
     #[test]
     fn python_secret_names_reach_rust_patch_without_dedup() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let secrets = HashMap::from([
                 ("API_KEY".to_string(), HashMap::new()),
                 ("DB_PASS".to_string(), HashMap::new()),

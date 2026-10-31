@@ -201,8 +201,8 @@ mod tests {
 
     #[test]
     fn an_unconfirmed_modification_keeps_its_class_and_message() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             import_source_errors(py);
             let error = microsandbox::MicrosandboxError::ModificationNotConfirmed {
                 cause: "the running sandbox does not hold the secret".to_string(),
