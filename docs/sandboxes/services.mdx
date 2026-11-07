@@ -344,8 +344,4 @@ Create, update, enable, disable, and remove each send one request and never retr
 
 ## Limits
 
-- Up to 20 Services can target one sandbox. Disabled Services count.
-- An organization can have up to 100 Services on the Free plan or 1,000 on paid plans. Disabled and detached Services count.
-- One sandbox accepts up to 100 concurrent requests across its Services. Extra requests return `429 service_busy_inflight`.
-
-The per-sandbox and organization Service limits can be raised on request.
+Organization and per-sandbox Service limits apply; going over them fails with `service_quota_exceeded` or `sandbox_service_limit_exceeded` (see [Service changes](/sdk/errors#service-changes)). Too many concurrent requests to one sandbox return `429 service_busy_inflight`.
