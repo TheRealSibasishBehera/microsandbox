@@ -235,7 +235,7 @@ msb service ls --sandbox new-sandbox
 ```
 </CodeGroup>
 
-The SDKs return one page at a time: 20 Services by default, up to 100 with a limit. Pass a page's next cursor to get the following page; the last page has none. `msb service ls` lists every page.
+The SDKs return one page at a time: 20 Services by default, up to 100 with a limit. Pass a page's next cursor to get the following page; the last page has none. `msb service ls` lists every Service.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -344,4 +344,4 @@ Create, update, enable, disable, and remove each send one request and never retr
 
 ## Limits
 
-Organization and per-sandbox Service limits apply; going over them fails with `service_quota_exceeded` or `sandbox_service_limit_exceeded` (see [Service changes](/sdk/errors#service-changes)). Too many concurrent requests to one sandbox return `429 service_busy_inflight`.
+Organization and per-sandbox Service limits apply; going over them fails with `service_quota_exceeded` or `sandbox_service_limit_exceeded` (see [Service changes](/sdk/errors#service-changes)). Disabled Services count toward both limits, and detached Services count toward the organization limit. Too many concurrent requests to one sandbox return `429 service_busy_inflight`.
