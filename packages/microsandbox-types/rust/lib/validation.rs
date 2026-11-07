@@ -1,4 +1,4 @@
-//! Shared validation rules for sandbox task descriptors.
+//! Shared validation rules for sandbox task descriptors and Service slugs.
 
 use crate::{TypesError, TypesResult};
 
@@ -11,6 +11,12 @@ pub const MAX_SANDBOX_NAME_BYTES: usize = 128;
 
 /// Maximum UTF-8 byte length for a guest hostname (Linux `__NEW_UTS_LEN`).
 pub const MAX_HOSTNAME_BYTES: usize = 64;
+
+/// Minimum byte length for a Service slug.
+const MIN_SLUG_BYTES: usize = 3;
+
+/// Maximum byte length for a Service slug: one DNS label.
+const MAX_SLUG_BYTES: usize = 63;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -41,6 +47,31 @@ pub fn validate_sandbox_name(name: &str) -> TypesResult<()> {
         return Err(TypesError::invalid_config(format!(
             "sandbox name must start with an alphanumeric and contain only \
              alphanumeric, dots, hyphens, and underscores: {name}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate a Service slug: 3 to 63 bytes of lowercase ASCII letters, digits and hyphens, with
+/// no leading, trailing or consecutive hyphens. A slug is rejected, never normalized.
+pub fn validate_slug(slug: &str) -> TypesResult<()> {
+    if !(MIN_SLUG_BYTES..=MAX_SLUG_BYTES).contains(&slug.len()) {
+        return Err(TypesError::invalid_config(format!(
+            "slug must be {MIN_SLUG_BYTES} to {MAX_SLUG_BYTES} characters: got {}",
+            slug.len()
+        )));
+    }
+
+    let charset_ok = slug
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let hyphens_ok = !slug.starts_with('-') && !slug.ends_with('-') && !slug.contains("--");
+
+    if !charset_ok || !hyphens_ok {
+        return Err(TypesError::invalid_config(format!(
+            "slug must contain only lowercase letters, digits, and single hyphens, \
+             and must not start or end with a hyphen: {slug}"
         )));
     }
 
@@ -163,6 +194,36 @@ mod tests {
             assert!(
                 validate_sandbox_name(name).is_err(),
                 "expected {name:?} to be rejected (non-alphanumeric start)"
+            );
+        }
+    }
+
+    #[test]
+    fn slug_accepts_only_dns_label_shapes() {
+        let longest = "a".repeat(MAX_SLUG_BYTES);
+        let too_long = "a".repeat(MAX_SLUG_BYTES + 1);
+        let cases = [
+            ("abc", true),
+            ("my-org-app", true),
+            ("a1-b2-c3", true),
+            ("123", true),
+            (longest.as_str(), true),
+            ("ab", false),
+            (too_long.as_str(), false),
+            ("-abc", false),
+            ("abc-", false),
+            ("ab--cd", false),
+            ("My-App", false),
+            ("my_app", false),
+            ("my.app", false),
+            ("my app", false),
+            ("caf\u{e9}", false),
+        ];
+        for (slug, accepted) in cases {
+            assert_eq!(
+                validate_slug(slug).is_ok(),
+                accepted,
+                "{slug:?} accepted should be {accepted}"
             );
         }
     }
