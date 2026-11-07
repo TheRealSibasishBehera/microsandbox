@@ -242,71 +242,7 @@ async fn disable_refuses_a_detached_service_without_sending_a_change() {
 }
 
 #[tokio::test]
-async fn paging_flags_fetch_one_page_and_json_keeps_the_list_shape() {
-    let dir = tempfile::tempdir().unwrap();
-    let (url, requests) = server(vec![Reply {
-        status: 200,
-        body: SERVICE_PAGE.to_string(),
-    }])
-    .await;
-
-    let output = cloud_cli(
-        dir.path(),
-        &url,
-        &[
-            "service",
-            "ls",
-            "--sandbox",
-            "web-1",
-            "--limit",
-            "1",
-            "--cursor",
-            "previous",
-        ],
-    )
-    .await;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("shop"));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr).trim(),
-        "More services: msb service ls --sandbox web-1 --limit 1 --cursor shop"
-    );
-    assert_eq!(
-        requests.await.unwrap(),
-        ["GET /v1/services?sandbox=web-1&cursor=previous&limit=1 HTTP/1.1"]
-    );
-
-    let (url, requests) = server(vec![Reply {
-        status: 200,
-        body: SERVICE_PAGE.to_string(),
-    }])
-    .await;
-    let output = cloud_cli(
-        dir.path(),
-        &url,
-        &["service", "ls", "--cursor", "previous", "--format", "json"],
-    )
-    .await;
-    let page: Value = serde_json::from_slice(&output.stdout).unwrap();
-
-    assert!(output.status.success());
-    assert_eq!(page[0]["slug"], "shop");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr).trim(),
-        "More services: msb service ls --cursor shop"
-    );
-    assert_eq!(
-        requests.await.unwrap(),
-        ["GET /v1/services?cursor=previous&limit=20 HTTP/1.1"]
-    );
-}
-
-#[tokio::test]
-async fn list_without_paging_flags_still_collects_every_page() {
+async fn list_collects_every_page_and_json_keeps_the_list_shape() {
     let dir = tempfile::tempdir().unwrap();
     let final_page = json!({"data": [], "next_cursor": null, "has_more": false});
     let (url, requests) = server(vec![

@@ -81,19 +81,15 @@ Shows the Service's slug, URL, status, target, and created and updated times. A 
 ```bash
 msb service ls
 msb service ls --sandbox new-sandbox
-msb service ls --limit 20
-msb service ls --cursor NEXT_CURSOR
 ```
 
 Also available as `msb service list`. Lists Services in slug order, including disabled and detached Services, as a table of slug, status, target, and URL.
 
-Without `--limit` or `--cursor`, the command fetches every page. With either paging flag, it fetches one page and prints a command for the next page to stderr when one exists. JSON output is always an array.
+The command fetches every page. JSON output is an array.
 
 | Flag | Description |
 |------|-------------|
 | `--sandbox` | Only show Services for this sandbox |
-| `--limit` | Maximum Services in one page (1–100) |
-| `--cursor` | Continue after a cursor from a previous page |
 | `--format` | Output format (`json`) |
 
 ## msb service remove

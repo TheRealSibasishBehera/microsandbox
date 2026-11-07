@@ -109,47 +109,17 @@ fn targets_need_a_sandbox_and_a_port_from_1_to_65535() {
 }
 
 #[test]
-fn list_parses_filters_and_optional_paging() {
+fn list_parses_the_sandbox_filter() {
     for alias in ["list", "ls"] {
-        let ServiceCommands::List(args) = parse(&[
-            alias,
-            "--sandbox",
-            "web-2",
-            "--limit",
-            "5",
-            "--cursor",
-            "next-page",
-            "--format",
-            "json",
-        ])
-        .unwrap() else {
+        let ServiceCommands::List(args) =
+            parse(&[alias, "--sandbox", "web-2", "--format", "json"]).unwrap()
+        else {
             panic!("expected list");
         };
 
         assert_eq!(args.sandbox.as_deref(), Some("web-2"));
-        assert_eq!(args.limit, Some(5));
-        assert_eq!(args.cursor.as_deref(), Some("next-page"));
         assert_eq!(args.format, Some(OutputFormat::Json));
     }
-
-    let ServiceCommands::List(defaults) = parse(&["ls"]).unwrap() else {
-        panic!("expected list");
-    };
-    assert_eq!(defaults.limit, None);
-    assert_eq!(defaults.cursor, None);
-}
-
-#[test]
-fn list_limit_must_be_from_1_to_100() {
-    for limit in ["0", "101"] {
-        let error = parse(&["list", "--limit", limit]).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{limit}");
-    }
-
-    let ServiceCommands::List(args) = parse(&["list", "--limit", "100"]).unwrap() else {
-        panic!("expected list");
-    };
-    assert_eq!(args.limit, Some(100));
 }
 
 #[test]

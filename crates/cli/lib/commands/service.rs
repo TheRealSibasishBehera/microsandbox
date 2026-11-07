@@ -5,12 +5,9 @@ mod output;
 use std::num::NonZeroU16;
 
 use clap::{Args, Subcommand};
-use microsandbox::{
-    CloudService, MicrosandboxError, Service, ServicePage, ServiceTarget, UnsupportedReason,
-};
+use microsandbox::{CloudService, MicrosandboxError, Service, ServiceTarget, UnsupportedReason};
 
 use self::output::{print_service, service_record, service_table};
-use super::common;
 use crate::ui::{self, OutputFormat};
 
 //--------------------------------------------------------------------------------------------------
@@ -129,14 +126,6 @@ pub struct ServiceListArgs {
     #[arg(long, value_name = "SANDBOX")]
     pub sandbox: Option<String>,
 
-    /// Services per page, 1 to 100. Supplying this fetches one page.
-    #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=100))]
-    pub limit: Option<u32>,
-
-    /// Continue after a cursor from a previous page. Supplying this fetches one page.
-    #[arg(long, value_name = "CURSOR")]
-    pub cursor: Option<String>,
-
     /// Output format (json).
     #[arg(long, value_name = "FORMAT", value_enum)]
     pub format: Option<OutputFormat>,
@@ -227,10 +216,6 @@ async fn inspect(args: ServiceInspectArgs) -> anyhow::Result<()> {
 }
 
 async fn list(args: ServiceListArgs) -> anyhow::Result<()> {
-    if args.limit.is_some() || args.cursor.is_some() {
-        return list_page(args).await;
-    }
-
     let services = list_all(args.sandbox.as_deref()).await?;
     let records: Vec<CloudService> = services.iter().map(service_record).collect();
 
@@ -245,32 +230,6 @@ async fn list(args: ServiceListArgs) -> anyhow::Result<()> {
     }
 
     service_table(&records).print();
-    Ok(())
-}
-
-async fn list_page(args: ServiceListArgs) -> anyhow::Result<()> {
-    let page = fetch_page(args.sandbox.as_deref(), args.limit, args.cursor.as_deref()).await?;
-    let records: Vec<CloudService> = page.services.iter().map(service_record).collect();
-
-    if args.format == Some(OutputFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(&records)?);
-    } else if records.is_empty() {
-        eprintln!("No services found.");
-    } else {
-        service_table(&records).print();
-    }
-
-    if let Some(cursor) = page.next_cursor {
-        eprint!("More services: msb service ls");
-        if let Some(sandbox) = args.sandbox {
-            eprint!(" --sandbox {}", common::hint_quote(&sandbox));
-        }
-        if let Some(limit) = args.limit {
-            eprint!(" --limit {limit}");
-        }
-        eprintln!(" --cursor {}", common::hint_quote(&cursor));
-    }
-
     Ok(())
 }
 
@@ -343,28 +302,6 @@ async fn list_all(sandbox: Option<&str>) -> anyhow::Result<Vec<Service>> {
             None => return Ok(services),
         }
     }
-}
-
-async fn fetch_page(
-    sandbox: Option<&str>,
-    limit: Option<u32>,
-    cursor: Option<&str>,
-) -> anyhow::Result<ServicePage> {
-    Ok(Service::list_with(|list| {
-        let list = match sandbox {
-            Some(sandbox) => list.sandbox(sandbox),
-            None => list,
-        };
-        let list = match limit {
-            Some(limit) => list.limit(limit),
-            None => list,
-        };
-        match cursor {
-            Some(cursor) => list.cursor(cursor),
-            None => list,
-        }
-    })
-    .await?)
 }
 
 //--------------------------------------------------------------------------------------------------
