@@ -29,7 +29,7 @@ fmt.Println(svc.URL())
 
 </Accordion>
 
-Create a Service for a running target without retrying. An invalid slug or port zero fails with <code>ErrInvalidConfig</code> before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled. Get and check the Service if <code>ctx</code> ends after the request is sent.
+Create a Service for a running target without retrying. Port zero fails with <code>ErrInvalidConfig</code> before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled. Get and check the Service if <code>ctx</code> ends after the request is sent.
 
 <p className="msb-label">Parameters</p>
 
@@ -59,7 +59,7 @@ Create a Service for a running target without retrying. An invalid slug or port 
 func GetService(ctx context.Context, slug string) (*Service, error)
 ```
 
-Get a Service by slug. An invalid slug fails before any request.
+Get a Service by slug.
 
 <p className="msb-label">Parameters</p>
 

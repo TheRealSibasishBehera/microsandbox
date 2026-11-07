@@ -32,7 +32,7 @@ print(svc.url)
 
 </Accordion>
 
-Create a Service for a running target without retrying. An invalid slug or port zero raises `InvalidConfigError` before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled. Get and check the Service if the task is cancelled after the request is sent.
+Create a Service for a running target without retrying. Port zero raises `InvalidConfigError` before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled. Get and check the Service if the task is cancelled after the request is sent.
 
 <p className="msb-label">Parameters</p>
 
@@ -62,7 +62,7 @@ Create a Service for a running target without retrying. An invalid slug or port 
 async def get(slug: str) -> Service
 ```
 
-Get a Service by slug. An invalid slug fails before any request.
+Get a Service by slug.
 
 <p className="msb-label">Parameters</p>
 

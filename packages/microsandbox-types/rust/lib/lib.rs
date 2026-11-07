@@ -92,5 +92,5 @@ pub use snapshot::{
 };
 pub use validation::{
     MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, hostname_from_sandbox_name, validate_hostname,
-    validate_sandbox_name, validate_slug,
+    validate_sandbox_name,
 };

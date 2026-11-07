@@ -54,7 +54,7 @@ svc = Microsandbox::Service.create("my-app", target: target)
 
 </Accordion>
 
-Create a Service without retrying. An invalid slug, a `nil` target, or port zero raises `InvalidConfigError` before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled.
+Create a Service without retrying. A `nil` target or port zero raises `InvalidConfigError` before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled.
 
 <p className="msb-label">Parameters</p>
 
@@ -75,7 +75,7 @@ Create a Service without retrying. An invalid slug, a `nil` target, or port zero
 Microsandbox::Service.get(slug) # => Service
 ```
 
-Get a Service by slug. An invalid slug fails before any request.
+Get a Service by slug.
 
 <p className="msb-label">Parameters</p>
 

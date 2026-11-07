@@ -45,8 +45,6 @@ impl Service {
     }
 
     /// Get a Service by slug through the default backend.
-    ///
-    /// An invalid slug fails with [`MicrosandboxError::InvalidConfig`] before any request.
     pub async fn get(slug: &str) -> MicrosandboxResult<Service> {
         let backend = default_backend();
         backend.services().get(backend.clone(), slug).await
@@ -172,7 +170,7 @@ impl ServiceBuilder {
 
     /// Create the Service without retrying.
     ///
-    /// A missing target, invalid slug, or port zero fails before any request.
+    /// A missing target or port zero fails before any request.
     pub async fn create(self) -> MicrosandboxResult<Service> {
         let Some(target) = self.target else {
             return Err(MicrosandboxError::InvalidConfig(format!(

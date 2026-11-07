@@ -56,7 +56,7 @@ Start a [`ServiceBuilder`](#servicebuilder).
 async fn get(slug: &str) -> MicrosandboxResult<Service>
 ```
 
-Get a Service by slug. An invalid slug fails before any request.
+Get a Service by slug.
 
 <p className="msb-label">Parameters</p>
 
@@ -298,7 +298,7 @@ Set the running sandbox and port that receive requests.
 async fn create(self) -> MicrosandboxResult<Service>
 ```
 
-Create the Service without retrying. A missing target, invalid slug, or port zero fails with `MicrosandboxError::InvalidConfig` before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled.
+Create the Service without retrying. A missing target or port zero fails with `MicrosandboxError::InvalidConfig` before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled.
 
 <p className="msb-label">Returns</p>
 

@@ -387,6 +387,39 @@ async fn remove_accepts_a_bodyless_no_content() {
 }
 
 #[tokio::test]
+async fn slugs_are_sent_as_one_encoded_path_segment() {
+    let server = FakeServer::start(respond(200, None, SERVICE)).await;
+    let backend = server.backend();
+    let mut info: CloudService = serde_json::from_str(SERVICE).unwrap();
+    info.slug = "a/b?c".into();
+
+    with_backend(backend.clone(), Service::get("a/b?c"))
+        .await
+        .unwrap();
+    let service = Service::from_cloud(backend, info);
+    service.update(|u| u.target("web-2", 8080)).await.unwrap();
+    service.enable().await.unwrap();
+    service.disable().await.unwrap();
+    // Only the route matters here: remove expects 204, so this 200 fails the call.
+    service.remove().await.unwrap_err();
+
+    let sent: Vec<(String, String)> = server
+        .requests()
+        .into_iter()
+        .map(|request| (request.method, request.target))
+        .collect();
+    let expected = [
+        ("GET", "/v1/services/a%2Fb%3Fc"),
+        ("PATCH", "/v1/services/a%2Fb%3Fc"),
+        ("POST", "/v1/services/a%2Fb%3Fc/enable"),
+        ("POST", "/v1/services/a%2Fb%3Fc/disable"),
+        ("DELETE", "/v1/services/a%2Fb%3Fc"),
+    ]
+    .map(|(method, target)| (method.to_owned(), target.to_owned()));
+    assert_eq!(sent, expected);
+}
+
+#[tokio::test]
 async fn refused_changes_carry_the_server_wait() {
     let server =
         FakeServer::start(respond(409, Some("5"), &error_body("target_unreachable"))).await;
@@ -450,14 +483,11 @@ async fn invalid_requests_fail_before_any_request() {
     let create = |builder: ServiceBuilder| with_backend(backend.clone(), builder.create());
     let list =
         |limit: u32| with_backend(backend.clone(), Service::list_with(move |l| l.limit(limit)));
-    let mut bad_slug: CloudService = serde_json::from_str(SERVICE).unwrap();
-    bad_slug.slug = "Bad_Slug".into();
+    let mut dot_slug: CloudService = serde_json::from_str(SERVICE).unwrap();
+    dot_slug.slug = "..".into();
 
     let errors = [
         create(Service::builder("shop")).await.unwrap_err(),
-        create(Service::builder("Shop").target("web-1", 8080))
-            .await
-            .unwrap_err(),
         create(Service::builder("shop").target("web-1", 0))
             .await
             .unwrap_err(),
@@ -469,7 +499,7 @@ async fn invalid_requests_fail_before_any_request() {
         with_backend(backend.clone(), Service::get(""))
             .await
             .unwrap_err(),
-        Service::from_cloud(backend.clone(), bad_slug)
+        Service::from_cloud(backend.clone(), dot_slug)
             .remove()
             .await
             .unwrap_err(),

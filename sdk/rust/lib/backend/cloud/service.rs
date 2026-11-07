@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use futures::future::BoxFuture;
 use microsandbox_types::{
     CloudCreateServiceRequest, CloudErrorBody, CloudPaginated, CloudService, CloudServiceTarget,
-    CloudUpdateServiceRequest, validate_slug,
+    CloudUpdateServiceRequest,
 };
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use reqwest::{RequestBuilder, Response, StatusCode};
@@ -98,7 +98,6 @@ impl ServiceBackend for CloudBackend {
         request: CloudCreateServiceRequest,
     ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
         Box::pin(async move {
-            validate_slug(&request.slug)?;
             validate_target(&request.target)?;
 
             let url = format!("{}/v1/services", self.url);
@@ -114,9 +113,7 @@ impl ServiceBackend for CloudBackend {
         slug: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
         Box::pin(async move {
-            validate_slug(slug)?;
-
-            let url = format!("{}/v1/services/{}", self.url, urlencoding(slug));
+            let url = service_url(&self.url, slug, None)?;
             let response = self
                 .http
                 .get(&url)
@@ -170,10 +167,9 @@ impl ServiceBackend for CloudBackend {
         request: CloudUpdateServiceRequest,
     ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
         Box::pin(async move {
-            validate_slug(slug)?;
             validate_update(slug, &request)?;
 
-            let url = format!("{}/v1/services/{}", self.url, urlencoding(slug));
+            let url = service_url(&self.url, slug, None)?;
             let sent = self.service_http.patch(&url).json(&request);
             let info = change_service(sent, ServiceChange::Update, slug).await?;
             Ok(Service::from_cloud(backend, info))
@@ -202,9 +198,7 @@ impl ServiceBackend for CloudBackend {
         slug: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
-            validate_slug(slug)?;
-
-            let url = format!("{}/v1/services/{}", self.url, urlencoding(slug));
+            let url = service_url(&self.url, slug, None)?;
             send_change(self.service_http.delete(&url), ServiceChange::Remove, slug).await?;
             Ok(())
         })
@@ -214,6 +208,25 @@ impl ServiceBackend for CloudBackend {
 //--------------------------------------------------------------------------------------------------
 // Functions: Validation
 //--------------------------------------------------------------------------------------------------
+
+/// The URL of one Service, with the slug percent-encoded as one path segment.
+///
+/// URL parsing drops or collapses an empty, `.` or `..` segment, which would send the request to
+/// another route, so those slugs fail before any request.
+fn service_url(base: &str, slug: &str, action: Option<&str>) -> MicrosandboxResult<String> {
+    if matches!(slug, "" | "." | "..") {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "service slug {slug:?} cannot be used in a request path"
+        )));
+    }
+
+    let mut url = format!("{base}/v1/services/{}", urlencoding(slug));
+    if let Some(action) = action {
+        url.push('/');
+        url.push_str(action);
+    }
+    Ok(url)
+}
 
 fn validate_target(target: &CloudServiceTarget) -> MicrosandboxResult<()> {
     if target.port == 0 {
@@ -255,9 +268,7 @@ fn change_status<'a>(
     change: ServiceChange,
 ) -> BoxFuture<'a, MicrosandboxResult<Service>> {
     Box::pin(async move {
-        validate_slug(slug)?;
-
-        let url = format!("{}/v1/services/{}/{}", cloud.url, urlencoding(slug), action);
+        let url = service_url(&cloud.url, slug, Some(action))?;
         let info = change_service(cloud.service_http.post(&url), change, slug).await?;
         Ok(Service::from_cloud(backend, info))
     })

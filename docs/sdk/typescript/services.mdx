@@ -58,7 +58,7 @@ Start a [`ServiceBuilder`](#servicebuilder).
 static get(slug: string): Promise<Service>
 ```
 
-Get a Service by slug. An invalid slug fails before any request.
+Get a Service by slug.
 
 <p className="msb-label">Parameters</p>
 
@@ -285,7 +285,7 @@ Set the running sandbox and port that receive requests.
 create(): Promise<Service>
 ```
 
-Create the Service without retrying. A port that is not an integer from 1 through 65535 throws `RangeError`; a missing target or invalid slug throws `InvalidConfigError`. Both errors occur before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled.
+Create the Service without retrying. A port that is not an integer from 1 through 65535 throws `RangeError`; a missing target throws `InvalidConfigError`. Both errors occur before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled.
 
 <p className="msb-label">Returns</p>
 
