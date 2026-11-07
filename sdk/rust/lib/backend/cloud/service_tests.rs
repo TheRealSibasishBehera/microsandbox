@@ -391,9 +391,9 @@ async fn slugs_are_sent_as_one_encoded_path_segment() {
     let server = FakeServer::start(respond(200, None, SERVICE)).await;
     let backend = server.backend();
     let mut info: CloudService = serde_json::from_str(SERVICE).unwrap();
-    info.slug = "a/b?c".into();
+    info.slug = "a/b?c%2e".into();
 
-    with_backend(backend.clone(), Service::get("a/b?c"))
+    with_backend(backend.clone(), Service::get("a/b?c%2e"))
         .await
         .unwrap();
     let service = Service::from_cloud(backend, info);
@@ -409,11 +409,11 @@ async fn slugs_are_sent_as_one_encoded_path_segment() {
         .map(|request| (request.method, request.target))
         .collect();
     let expected = [
-        ("GET", "/v1/services/a%2Fb%3Fc"),
-        ("PATCH", "/v1/services/a%2Fb%3Fc"),
-        ("POST", "/v1/services/a%2Fb%3Fc/enable"),
-        ("POST", "/v1/services/a%2Fb%3Fc/disable"),
-        ("DELETE", "/v1/services/a%2Fb%3Fc"),
+        ("GET", "/v1/services/a%2Fb%3Fc%252e"),
+        ("PATCH", "/v1/services/a%2Fb%3Fc%252e"),
+        ("POST", "/v1/services/a%2Fb%3Fc%252e/enable"),
+        ("POST", "/v1/services/a%2Fb%3Fc%252e/disable"),
+        ("DELETE", "/v1/services/a%2Fb%3Fc%252e"),
     ]
     .map(|(method, target)| (method.to_owned(), target.to_owned()));
     assert_eq!(sent, expected);
@@ -483,8 +483,11 @@ async fn invalid_requests_fail_before_any_request() {
     let create = |builder: ServiceBuilder| with_backend(backend.clone(), builder.create());
     let list =
         |limit: u32| with_backend(backend.clone(), Service::list_with(move |l| l.limit(limit)));
-    let mut dot_slug: CloudService = serde_json::from_str(SERVICE).unwrap();
-    dot_slug.slug = "..".into();
+    let with_slug = |slug: &str| {
+        let mut info: CloudService = serde_json::from_str(SERVICE).unwrap();
+        info.slug = slug.into();
+        Service::from_cloud(backend.clone(), info)
+    };
 
     let errors = [
         create(Service::builder("shop")).await.unwrap_err(),
@@ -499,10 +502,8 @@ async fn invalid_requests_fail_before_any_request() {
         with_backend(backend.clone(), Service::get(""))
             .await
             .unwrap_err(),
-        Service::from_cloud(backend.clone(), dot_slug)
-            .remove()
-            .await
-            .unwrap_err(),
+        with_slug(".").enable().await.unwrap_err(),
+        with_slug("..").remove().await.unwrap_err(),
         list(0).await.unwrap_err(),
         list(101).await.unwrap_err(),
     ];

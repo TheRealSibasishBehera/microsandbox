@@ -206,17 +206,17 @@ impl ServiceBackend for CloudBackend {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Validation
+// Functions: Request URLs
 //--------------------------------------------------------------------------------------------------
 
 /// The URL of one Service, with the slug percent-encoded as one path segment.
 ///
-/// URL parsing drops or collapses an empty, `.` or `..` segment, which would send the request to
-/// another route, so those slugs fail before any request.
+/// URL parsing resolves a `.` or `..` segment, and an empty slug leaves an empty segment, so each
+/// would reach another route; those slugs fail before any request.
 fn service_url(base: &str, slug: &str, action: Option<&str>) -> MicrosandboxResult<String> {
     if matches!(slug, "" | "." | "..") {
         return Err(MicrosandboxError::InvalidConfig(format!(
-            "service slug {slug:?} cannot be used in a request path"
+            "service slug {slug:?} is not valid"
         )));
     }
 
@@ -227,6 +227,10 @@ fn service_url(base: &str, slug: &str, action: Option<&str>) -> MicrosandboxResu
     }
     Ok(url)
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Validation
+//--------------------------------------------------------------------------------------------------
 
 fn validate_target(target: &CloudServiceTarget) -> MicrosandboxResult<()> {
     if target.port == 0 {
